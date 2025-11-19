@@ -1,729 +1,185 @@
-// main.ts (v1.28 - Final Fix for Stream Hash Error)
-import {
-  S3Client,
-  PutObjectCommand,
-} from "npm:@aws-sdk/client-s3";
-import { Upload } from "npm:@aws-sdk/lib-storage";
-import { timingSafeEqual } from "jsr:@std/crypto/timing-safe-equal";
+import { S3Client, PutObjectCommand } from "npm:@aws-sdk/client-s3";
+import { getSignedUrl } from "npm:@aws-sdk/s3-request-presigner";
+import { DOMParser } from "https://deno.land/x/deno_dom/deno-dom-wasm.ts";
 
-// --- 1. Check for Required Environment Variables ---
-const REQUIRED_ENV_VARS = [
-  "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", 
-  "R2_BUCKET_NAME", "R2_PUBLIC_URL"
-];
+const R2_ACCOUNT_ID = Deno.env.get("R2_ACCOUNT_ID") || "";
+const R2_ACCESS_KEY_ID = Deno.env.get("R2_ACCESS_KEY_ID") || "";
+const R2_SECRET_ACCESS_KEY = Deno.env.get("R2_SECRET_ACCESS_KEY") || "";
+const R2_BUCKET_NAME = Deno.env.get("R2_BUCKET_NAME") || "";
+const R2_PUBLIC_URL_RAW = Deno.env.get("R2_PUBLIC_URL") || "";
 
-for (const varName of REQUIRED_ENV_VARS) {
-  if (!Deno.env.get(varName)) {
-    console.error(`[FATAL ERROR] Missing required environment variable: ${varName}`);
-    // Deno Deploy does not allow Deno.exit(), so we throw an error.
-    throw new Error(`Missing required environment variable: ${varName}`); 
-  }
-}
+Deno.serve(async (req) => {
+  // Clean up Public URL
+  let R2_PUBLIC_URL = R2_PUBLIC_URL_RAW.trim();
+  if (R2_PUBLIC_URL && !R2_PUBLIC_URL.startsWith("http")) R2_PUBLIC_URL = `https://${R2_PUBLIC_URL}`;
+  if (R2_PUBLIC_URL.endsWith("/")) R2_PUBLIC_URL = R2_PUBLIC_URL.slice(0, -1);
 
-// --- 2. Get Secrets from Deno Deploy Environment Variables ---
-const R2_ACCOUNT_ID = Deno.env.get("R2_ACCOUNT_ID")!;
-const R2_ACCESS_KEY_ID = Deno.env.get("R2_ACCESS_KEY_ID")!;
-const R2_SECRET_ACCESS_KEY = Deno.env.get("R2_SECRET_ACCESS_KEY")!;
-const R2_BUCKET_NAME = Deno.env.get("R2_BUCKET_NAME")!;
-const R2_PUBLIC_URL = Deno.env.get("R2_PUBLIC_URL")!;
-
-const BASIC_AUTH_USER = Deno.env.get("BASIC_AUTH_USER");
-const BASIC_AUTH_PASS = Deno.env.get("BASIC_AUTH_PASS");
-
-// --- 3. Open Deno KV Database (for History) ---
-const kv = await Deno.openKv();
-
-// --- 4. Create S3 Client for R2 ---
-const s3Client = new S3Client({
-  region: "auto",
-  endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-  credentials: {
-    accessKeyId: R2_ACCESS_KEY_ID,
-    secretAccessKey: R2_SECRET_ACCESS_KEY,
-  },
-});
-
-// --- 5. Helper Functions ---
-const MAX_DATE_MS = 9999999999999; 
-
-function mimeToExt(mimeType: string): string {
-  const mapping: { [key: string]: string } = { 
-    'video/mp4': 'mp4','video/webm': 'webm','video/x-matroska': 'mkv',
-    'video/quicktime': 'mov','video/avi': 'avi','image/jpeg': 'jpg',
-    'image/png': 'png','image/gif': 'gif','application/octet-stream': 'bin'
-  };
-  const simpleMime = mimeType.split(';')[0];
-  return mapping[simpleMime] || 'bin';
-}
-function formatTimeAgo(date: Date): string {
-  const seconds = Math.floor((new Date().getTime() - date.getTime()) / 1000);
-  let interval = seconds / 31536000;
-  if (interval > 1) return Math.floor(interval) + " years ago";
-  interval = seconds / 2592000;
-  if (interval > 1) return Math.floor(interval) + " months ago";
-  interval = seconds / 86400;
-  if (interval > 1) return Math.floor(interval) + " days ago";
-  interval = seconds / 3600;
-  if (interval > 1) return Math.floor(interval) + " hours ago";
-  interval = seconds / 60;
-  if (interval > 1) return Math.floor(interval) + " minutes ago";
-  return Math.floor(seconds) + " seconds ago";
-}
-function sanitizeFileName(name: string | null | undefined): string | null {
-  if (!name || name.trim() === "") return null;
-  // Remove extension, illegal chars, and replace spaces/underscores with hyphens
-  return name.replace(/\.[^/.]+$/, "").replace(/[?&#/\\]/g, "").replace(/[\s_]+/g, "-").trim() || null;
-}
-
-
-// --- 6. Start the Web Server ---
-Deno.serve(async (req: Request) => {
-
-  // --- BASIC AUTH CHECK ---
-  if (BASIC_AUTH_USER && BASIC_AUTH_PASS) {
-    const authHeader = req.headers.get("Authorization");
-    if (authHeader) {
-      const auth = authHeader.split(" ")[1];
-      if (auth) {
-        // Decode base64 to 'user:pass'
-        const authString = new TextDecoder().decode(Uint8Array.from(atob(auth), c => c.charCodeAt(0)));
-        const [user, pass] = authString.split(":");
-        
-        const encoder = new TextEncoder();
-        const userBytes = encoder.encode(user);
-        const passBytes = encoder.encode(pass);
-        const expectedUserBytes = encoder.encode(BASIC_AUTH_USER);
-        const expectedPassBytes = encoder.encode(BASIC_AUTH_PASS);
-
-        // FIX: timingSafeEqual imported correctly as a direct function
-        const userMatch = userBytes.length === expectedUserBytes.length &&
-          timingSafeEqual(userBytes, expectedUserBytes);
-        const passMatch = passBytes.length === expectedPassBytes.length &&
-          timingSafeEqual(passBytes, expectedPassBytes);
-
-        if (!userMatch || !passMatch) {
-          return new Response("Unauthorized", { status: 401, headers: { 'WWW-Authenticate': 'Basic realm="Restricted Area"' },});
-        }
-      } else {
-        return new Response("Unauthorized", { status: 401, headers: { 'WWW-Authenticate': 'Basic realm="Restricted Area"' },});
-      }
-    } else {
-      return new Response("Unauthorized", { status: 401, headers: { 'WWW-Authenticate': 'Basic realm="Restricted Area"' },});
-    }
+  if (!R2_ACCOUNT_ID || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_BUCKET_NAME) {
+    return new Response("Error: R2 Env Vars missing", { status: 500 });
   }
 
   const url = new URL(req.url);
 
-  // --- 6B. Serve the Uploader HTML Page ---
+  // 1. UI Section
   if (req.method === "GET" && url.pathname === "/") {
-    
-    // NOTE: HTML content remains the same as v1.27 since the fixes were already applied there.
-    // The main fix for "hash calculation" is in the POST /upload-file route below.
-    return new Response(
-      `
+    const html = `
       <!DOCTYPE html>
-      <html>
+      <html lang="en">
       <head>
-        <title>R2 Uploader</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>MediaFire to R2</title>
         <style>
-          :root {
-            --bg: #1a1a1a; --card-bg: #2a2a2a; --text: #f0f0f0; --text-dim: #888;
-            --accent: #007aff; --accent-hover: #0056b3; --success: #34C759; --error: #FF3B30;
-            --tab-inactive: #444; --border: #333; --progress-bg: #444; --input-bg: #1f1f1f;
-          }
-          body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            display: grid; place-items: center; min-height: 100vh; margin: 0;
-            background: var(--bg); color: var(--text);
-          }
-          .container {
-            width: 90%; max-width: 420px; background: var(--card-bg);
-            padding: 1.5rem 2rem 2rem 2rem; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.3);
-          }
-          .header {
-            display: flex; justify-content: space-between; align-items: center;
-            margin-bottom: 1.5rem;
-          }
-          h2 { margin: 0; }
-          #history-link { font-size: 0.9em; color: var(--accent); text-decoration: none; }
-          .tab-buttons { display: flex; border-bottom: 2px solid var(--border); margin-bottom: 1.5rem; }
-          .tab-btn {
-            flex: 1; padding: 0.8rem; background: none; border: none; color: var(--text-dim);
-            font-size: 1rem; cursor: pointer; border-bottom: 3px solid transparent;
-          }
-          .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
-          .tab-content { display: none; }
-          .tab-content.active { display: block; }
-          form { display: flex; flex-direction: column; gap: 1rem; }
-          #fileLabel {
-            display: block; padding: 1.5rem 1rem; border: 2px dashed var(--text-dim);
-            border-radius: 8px; cursor: pointer; text-align: center; transition: background 0.2s;
-          }
-          #fileLabel:hover { background: rgba(255,255,255,0.05); }
-          #fileName { font-size: 0.9em; color: var(--text-dim); margin-top: 0.5rem; }
-          
-          .input-field {
-            font-size: 1rem; padding: 0.8rem; background: var(--bg); border: 1px solid var(--border);
-            border-radius: 8px; color: var(--text);
-          }
-          .submitBtn {
-            font-size: 1rem; padding: 0.9rem; background: var(--accent); color: white;
-            border: none; border-radius: 8px; cursor: pointer; transition: background 0.2s; margin-top: 0.5rem;
-          }
-          .submitBtn:hover { background: var(--accent-hover); }
-          .submitBtn:disabled { background: var(--text-dim); cursor: not-allowed; }
-          
-          #progress-container { display: none; margin-top: 1rem; }
-          #progress-bar-outer { width: 100%; background: var(--progress-bg); border-radius: 5px; overflow: hidden; }
-          #progress-bar-inner {
-            height: 10px; background: var(--accent); border-radius: 5px;
-            width: 0%; transition: width 0.2s ease-out;
-          }
-          #progress-text { text-align: center; margin-top: 5px; font-size: 0.9em; color: var(--text-dim); }
-          #progress-bar-inner.indeterminate {
-            width: 100% !important;
-            background: linear-gradient(90deg, var(--accent-hover) 0%, var(--accent) 50%, var(--accent-hover) 100%);
-            background-size: 200% 100%;
-            animation: indeterminate-scroll 1.5s linear infinite;
-          }
-          @keyframes indeterminate-scroll {
-            0% { background-position: 200% 0; }
-            100% { background-position: -200% 0; }
-          }
-          
-          #result { margin-top: 1.5rem; width: 100%; }
-          .success { color: var(--success); text-align: center; display: block; margin-bottom: 1rem; }
-          .error { color: var(--error); text-align: center; display: block; word-break: break-all;}
-          
-          .links-container { display: flex; flex-direction: column; gap: 0.75rem; }
-          .link-box { display: flex; flex-direction: column; gap: 0.5rem; }
-          .link-box strong { font-size: 0.9em; color: var(--text-dim); }
-          .link-input-group { display: flex; }
-          .link-box input[type="text"] {
-            flex: 1; font-size: 0.9rem; padding: 0.5rem; background: var(--input-bg);
-            border: 1px solid var(--border); border-right: none;
-            color: var(--text); border-radius: 4px 0 0 4px;
-        }
-          .copy-btn {
-            font-size: 0.9rem; padding: 0 0.75rem; background: var(--accent); color: white;
-            border: 1px solid var(--accent); border-radius: 0 4px 4px 0; cursor: pointer;
-          }
-          .copy-btn:hover { background: var(--accent-hover); }
+          body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background: #f0f2f5; margin: 0; }
+          .card { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,0.12); width: 100%; max-width: 400px; text-align: center; }
+          h2 { color: #007bff; margin-top: 0; }
+          p { color: #666; font-size: 14px; margin-bottom: 25px; }
+          input { width: 100%; padding: 14px; margin-bottom: 15px; border: 1px solid #dfe6e9; border-radius: 8px; box-sizing: border-box; outline: none; transition: border 0.2s; }
+          input:focus { border-color: #007bff; }
+          button { width: 100%; padding: 14px; background: #007bff; color: white; border: none; border-radius: 8px; font-weight: 600; font-size: 16px; cursor: pointer; transition: background 0.2s; }
+          button:hover { background: #0056b3; }
+          #status { margin-top: 20px; font-size: 0.9rem; text-align: left; word-break: break-all; }
+          .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3); border-radius: 50%; border-top-color: #fff; animation: spin 1s infinite; margin-bottom: -3px;}
+          @keyframes spin { to { transform: rotate(360deg); } }
+          textarea { width: 100%; padding: 10px; background: #f8f9fa; border: 1px solid #ddd; border-radius: 6px; margin-top: 10px; font-size: 12px; box-sizing: border-box; resize: none; }
+          .success-box { background:#e7f5ff; padding:15px; border-radius:8px; text-align:center; }
         </style>
       </head>
       <body>
-        <div class="container">
-          <div class="header">
-            <h2>R2 Uploader</h2>
-            <a href="/history" id="history-link">View History</a>
-          </div>
-          
-          <div class="tab-buttons">
-            <button class="tab-btn active" data-tab="file">Upload File</button>
-            <button class="tab-btn" data-tab="url">Remote URL</button>
-          </div>
-
-          <div id="tab-file" class="tab-content active">
-            <form id="fileUploadForm">
-              <label for="file" id="fileLabel">
-                Click to select file
-                <div id="fileName">No file chosen</div>
-              </label>
-              <input type="file" id="file" name="file" style="display:none;" required>
-              <button type="submit" id="fileSubmitBtn" class="submitBtn" disabled>Upload File</button>
-            </form>
-          </div>
-          
-          <div id="tab-url" class="tab-content">
-            <form id="urlUploadForm">
-              <input type="url" id="urlInput" class="input-field" placeholder="Enter remote URL (http://...)" required>
-              <input type="text" id="nameInput" class="input-field" placeholder="Custom file name (ASCII ONLY)">
-              <button type="submit" id="urlSubmitBtn" class="submitBtn">Upload from URL</button>
-            </form>
-          </div>
-
-          <div id="progress-container">
-            <div id="progress-bar-outer">
-              <div id="progress-bar-inner"></div>
-            </div>
-            <div id="progress-text">0%</div>
-          </div>
-          
-          <div id="result"></div>
+        <div class="card">
+          <h2>🔥 MediaFire to R2</h2>
+          <p>Auto-Extract & Direct Upload</p>
+          <form id="uploadForm">
+            <input type="url" name="url" placeholder="Paste MediaFire Link" required />
+            <input type="text" name="name" placeholder="Filename (Optional)" />
+            <button type="submit">Start Transfer</button>
+          </form>
+          <div id="status"></div>
         </div>
-        
         <script>
-          const resultDiv = document.getElementById('result');
-          const progressContainer = document.getElementById('progress-container');
-          const progressBar = document.getElementById('progress-bar-inner');
-          const progressText = document.getElementById('progress-text');
+          const form = document.querySelector('#uploadForm');
+          const status = document.querySelector('#status');
           
-          document.querySelectorAll('.tab-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
-              document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-              btn.classList.add('active');
-              document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-              document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
-              resetUI();
-            });
-          });
-          
-          document.body.addEventListener('click', (e) => {
-            if (e.target.classList.contains('copy-btn')) {
-              const inputField = e.target.closest('.link-input-group').querySelector('input[type="text"]');
-              if (inputField) {
-                inputField.select();
-                try {
-                  navigator.clipboard.writeText(inputField.value);
-                  e.target.textContent = 'Copied!';
-                  setTimeout(() => { e.target.textContent = 'Copy'; }, 2000);
-                } catch (err) { console.error('Copy failed', err); }
-              }
-            }
-          });
-
-          const fileForm = document.getElementById('fileUploadForm');
-          const fileInput = document.getElementById('file');
-          const fileNameDiv = document.getElementById('fileName');
-          const fileSubmitBtn = document.getElementById('fileSubmitBtn');
-
-          fileInput.addEventListener('change', () => {
-            if (fileInput.files.length > 0) {
-              fileNameDiv.textContent = fileInput.files[0].name;
-              fileSubmitBtn.disabled = false;
-            } else {
-              fileNameDiv.textContent = 'No file chosen';
-              fileSubmitBtn.disabled = true;
-            }
-            resetUI();
-          });
-
-          fileForm.addEventListener('submit', (e) => {
+          form.onsubmit = async (e) => {
             e.preventDefault();
-            const file = fileInput.files[0];
-            if (!file) return;
-            setLoading(fileSubmitBtn, 'Uploading...', true);
-            showProgress(0, '0%');
-            const formData = new FormData();
-            formData.append('file', file);
-            
-            // NOTE: Using fetch instead of XMLHttpRequest to simplify, 
-            // but XMLHttpRequest remains better for true upload progress events.
-            // Sticking to XHR for progress tracking but ensuring the server side can handle the file buffer.
-            
-            const xhr = new XMLHttpRequest();
-            xhr.open('POST', '/upload-file');
-            xhr.upload.addEventListener('progress', (event) => {
-              if (event.lengthComputable) {
-                const percent = Math.round((event.loaded / event.total) * 100);
-                showProgress(percent, percent + '%');
-              }
-            });
-            xhr.addEventListener('load', () => {
-              hideProgress();
-              setLoading(fileSubmitBtn, 'Upload File', false);
-              try {
-                const data = JSON.parse(xhr.responseText);
-                if (xhr.status === 200) {
-                  setResult(data);
-                } else {
-                  setResult(data.error, 'error');
-                }
-              } catch (err) {
-                setResult(\`Server error: \${xhr.responseText}\`, 'error');
-              }
-            });
-            xhr.addEventListener('error', () => {
-              hideProgress();
-              setLoading(fileSubmitBtn, 'Upload File', false);
-              setResult('Upload failed. Network error.', 'error');
-            });
-            xhr.send(formData);
-          });
+            const btn = form.querySelector('button');
+            const oldText = btn.innerText;
+            btn.disabled = true;
+            btn.innerHTML = '<div class="spinner"></div> Processing...';
+            status.innerHTML = '';
 
-          const urlForm = document.getElementById('urlUploadForm');
-          const urlInput = document.getElementById('urlInput');
-          const nameInput = document.getElementById('nameInput'); 
-          const urlSubmitBtn = document.getElementById('urlSubmitBtn');
-
-          urlForm.addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const remoteUrl = urlInput.value;
-            const customName = nameInput.value; 
-            if (!remoteUrl) return;
-
-            setLoading(urlSubmitBtn, 'Uploading...', true);
-            showProgress(100, 'Uploading from remote URL...', true);
+            const formData = new FormData(form);
             try {
-              const response = await fetch('/upload-remote', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url: remoteUrl, name: customName }) 
-              });
+              const res = await fetch('/upload', { method: 'POST', body: formData });
+              const data = await res.json();
               
-              const data = await response.json();
-              if (response.ok) {
-                setResult(data);
+              if(data.success) {
+                status.innerHTML = \`
+                  <div class="success-box">
+                    <h3 style="color:#007bff; margin:0 0 5px 0;">✅ Saved to R2!</h3>
+                    <p style="font-size:12px; color:#555; margin-bottom:10px;">\${data.fileName}</p>
+                    <textarea rows="3" onclick="this.select()">\${data.link}</textarea>
+                    <button onclick="location.reload()" style="margin-top:10px; font-size:12px; padding:8px; background:#17a2b8; border:none; border-radius:4px; color:white; cursor:pointer;">Transfer Another</button>
+                  </div>
+                \`;
+                btn.style.display = 'none';
               } else {
-                setResult(data.error, 'error');
+                status.innerHTML = '<div style="color:red; text-align:center; padding:10px;">❌ Error: ' + data.error + '</div>';
+                btn.disabled = false;
+                btn.innerText = oldText;
               }
-            } catch (err) {
-              setResult(\`Network error: \${err.message}\`, 'error');
-            } finally {
-              hideProgress();
-              setLoading(urlSubmitBtn, 'Upload from URL', false);
+            } catch(err) {
+              status.innerHTML = '<div style="color:red; text-align:center; padding:10px;">Network Error</div>';
+              btn.disabled = false;
+              btn.innerText = oldText;
             }
-          });
-
-          function setLoading(button, text, disabled = true) {
-            button.disabled = disabled;
-            button.textContent = text;
-          }
-          
-          function setResult(data, type = 'success') {
-            if (type === 'error') {
-              resultDiv.innerHTML = \`<span class="error">\${data}</span>\`;
-            } else {
-              // FIX: Ensures data.proxyUrl is correctly displayed as a JS variable
-              resultDiv.innerHTML = \`
-                <span class="success">Upload Complete!</span>
-                <div class="links-container">
-                  <div class="link-box">
-                    <strong>No VPN (Proxy Play)</strong>
-                    <div class="link-input-group">
-                      <input type="text" value="\${data.proxyUrl}" readonly>
-                      <button class="copy-btn">Copy</button>
-                    </div>
-                  </div>
-                  
-                  <div class="link-box">
-                    <strong>No VPN (Auto Download)</strong>
-                    <div class="link-input-group">
-                      <input type="text" value="\${data.downloadLink}" readonly>
-                      <button class="copy-btn">Copy</button>
-                    </div>
-                  </div>
-                  
-                  <div class="link-box">
-                    <strong>R2 Original (Auto Download)</strong>
-                    <div class="link-input-group">
-                      <input type="text" value="\${data.r2Url}" readonly>
-                      <button class="copy-btn">Copy</button>
-                    </div>
-                  </div>
-                </div>
-              \`;
-            }
-          }
-          
-          function showProgress(percent, text, indeterminate = false) {
-            progressContainer.style.display = 'block';
-            progressBar.style.width = percent + '%';
-            progressText.textContent = text;
-            if (indeterminate) {
-              progressBar.classList.add('indeterminate');
-            } else {
-              progressBar.classList.remove('indeterminate');
-            }
-          }
-          
-          function hideProgress() {
-            progressContainer.style.display = 'none';
-          }
-          
-          function resetUI() {
-            resultDiv.innerHTML = '';
-            hideProgress();
-          }
+          };
         </script>
       </body>
       </html>
-    `,
-      { headers: { "Content-Type": "text/html; charset=utf-8" } },
-    );
+    `;
+    return new Response(html, { headers: { "content-type": "text/html" } });
   }
 
-  // --- 6C. Handle File Upload (from computer) ---
-  if (req.method === "POST" && url.pathname === "/upload-file") {
+  // 2. Upload Logic
+  if (req.method === "POST" && url.pathname === "/upload") {
     try {
       const formData = await req.formData();
-      const file = formData.get("file") as File;
-      if (!file) return Response.json({ error: "No file found." }, { status: 400 });
-      
-      const contentType = file.type || "application/octet-stream";
-      const extension = mimeToExt(contentType);
-      
-      const originalName = file.name || "file.bin";
-      const sanitizedName = sanitizeFileName(originalName);
-      const fileName = `${sanitizedName || crypto.randomUUID()}.${extension}`;
-      
-      // FIX (v1.28): Convert file stream to a Buffer (Uint8Array) before sending to S3.
-      // This solves the "Unable to calculate hash for flowing readable stream" error.
-      const fileBuffer = await file.arrayBuffer(); 
+      let remoteUrl = formData.get("url") as string;
+      let fileName = formData.get("name") as string;
 
-      const putCommand = new PutObjectCommand({
+      if (!remoteUrl) throw new Error("URL is required");
+
+      // --- MEDIAFIRE EXTRACTION START ---
+      if (remoteUrl.includes("mediafire.com")) {
+        const mfRes = await fetch(remoteUrl, {
+             headers: { "User-Agent": "Mozilla/5.0" }
+        });
+        const html = await mfRes.text();
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        
+        const downloadButton = doc?.getElementById("downloadButton");
+        const directLink = downloadButton?.getAttribute("href");
+        
+        if (!directLink) throw new Error("Could not extract direct link from MediaFire.");
+        remoteUrl = directLink;
+      }
+      // --- MEDIAFIRE EXTRACTION END ---
+
+      // Use extracted URL to get stream
+      const remoteRes = await fetch(remoteUrl);
+      if (!remoteRes.body) throw new Error("Failed to fetch file stream.");
+      
+      // Determine Filename
+      if (!fileName) {
+          const disp = remoteRes.headers.get("content-disposition");
+          if (disp && disp.includes("filename=")) {
+              fileName = disp.split("filename=")[1].replace(/"/g, "");
+          } else {
+              fileName = remoteUrl.split('/').pop()?.split('?')[0] || `file-${Date.now()}.bin`;
+          }
+      }
+
+      const contentType = remoteRes.headers.get("content-type") || "application/octet-stream";
+
+      // Initialize R2 S3 Client
+      const s3 = new S3Client({
+        region: "auto",
+        endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+        credentials: { accessKeyId: R2_ACCESS_KEY_ID, secretAccessKey: R2_SECRET_ACCESS_KEY },
+      });
+
+      // Create Signed URL for Direct Upload (Fastest Method)
+      const command = new PutObjectCommand({
         Bucket: R2_BUCKET_NAME,
         Key: fileName,
-        Body: new Uint8Array(fileBuffer), // Use the buffered data here
         ContentType: contentType,
-        ContentLength: file.size, 
-        ContentDisposition: `attachment; filename="${fileName}"`,
+        ContentDisposition: `attachment; filename="${fileName}"`, // Auto Download Header
       });
-      await s3Client.send(putCommand);
       
-      const proxyLink = `https://${url.host}/image/${fileName}`;
-      const r2Link = `https://${R2_PUBLIC_URL}/${fileName}`;
-      const downloadLink = `https://${url.host}/download/${fileName}`;
-      
-      const entry = {
-        fileName,
-        proxyUrl: proxyLink,
-        r2Url: r2Link,
-        downloadUrl: downloadLink,
-        createdAt: new Date(),
-        source: "File Upload"
-      };
-      
-      await kv.set(["uploads", MAX_DATE_MS - Date.now(), crypto.randomUUID()], entry);
+      const signedUploadUrl = await getSignedUrl(s3, command, { expiresIn: 3600 });
 
-      return Response.json({ proxyUrl: proxyLink, r2Url: r2Link, downloadLink: downloadLink });
-    } catch (err) {
-      console.error("File Upload Error:", err);
-      // Ensure the error message is human-readable if possible
-      return Response.json({ error: `Upload failed: ${err.message || 'Internal Server Error'}` }, { status: 500 });
-    }
-  }
-
-  // --- 6D. Handle Remote URL Upload ---
-  if (req.method === "POST" && url.pathname === "/upload-remote") {
-    try {
-      const { url: remoteUrl, name: customName } = await req.json();
-      if (!remoteUrl) return Response.json({ error: "No URL provided." }, { status: 400 });
-      
-      const remoteResponse = await fetch(remoteUrl);
-      if (!remoteResponse.ok) return Response.json({ error: `Remote server error: ${remoteResponse.status}` }, { status: 400 });
-      if (!remoteResponse.body) return Response.json({ error: "Remote file has no content." }, { status: 400 });
-
-      const contentType = remoteResponse.headers.get("Content-Type") || "application/octet-stream";
-      const extension = mimeToExt(contentType);
-      
-      const sanitizedName = sanitizeFileName(customName);
-      const fileName = `${sanitizedName || crypto.randomUUID()}.${extension}`;
-      
-      const parallelUploads3 = new Upload({
-        client: s3Client,
-        params: {
-          Bucket: R2_BUCKET_NAME,
-          Key: fileName,
-          Body: remoteResponse.body as any,
-          ContentType: contentType,
-          ContentDisposition: `attachment; filename="${fileName}"`,
-        },
-        queueSize: 8, 
-        partSize: 25 * 1024 * 1024, // Optimized for speed
+      // Pipe Stream to R2
+      const uploadRes = await fetch(signedUploadUrl, {
+        method: "PUT",
+        body: remoteRes.body,
+        headers: {
+            "Content-Type": contentType,
+            "Content-Disposition": `attachment; filename="${fileName}"`,
+        }
       });
 
-      parallelUploads3.on("httpUploadProgress", (progress) => {
-        console.log(`[Remote Upload: ${fileName}] Part: ${progress.part}, Loaded: ${progress.loaded} / ${progress.total}`);
+      if (!uploadRes.ok) throw new Error(`Upload Failed: ${uploadRes.statusText}`);
+
+      return Response.json({
+        success: true,
+        fileName: fileName,
+        link: `${R2_PUBLIC_URL}/${fileName}`
       });
 
-      await parallelUploads3.done();
-      
-      const proxyLink = `https://${url.host}/image/${fileName}`;
-      const r2Link = `https://${R2_PUBLIC_URL}/${fileName}`;
-      const downloadLink = `https://${url.host}/download/${fileName}`;
-
-      const entry = {
-        fileName,
-        proxyUrl: proxyLink,
-        r2Url: r2Link,
-        downloadUrl: downloadLink,
-        createdAt: new Date(),
-        source: "Remote URL"
-      };
-      
-      await kv.set(["uploads", MAX_DATE_MS - Date.now(), crypto.randomUUID()], entry);
-
-      return Response.json({ proxyUrl: proxyLink, r2Url: r2Link, downloadLink: downloadLink });
     } catch (err) {
-      console.error("Remote Upload Error:", err);
-      return Response.json({ error: `Remote upload failed: ${err.message}` }, { status: 500 });
+      return Response.json({ success: false, error: err.message });
     }
   }
 
-  // --- 6E. Handle the Proxy Request (GET /image/...) (For Playing) ---
-  if (req.method === "GET" && url.pathname.startsWith("/image/")) {
-    if (!R2_PUBLIC_URL) return new Response("R2_PUBLIC_URL not set.", { status: 500 });
-    const fileName = url.pathname.substring("/image/".length);
-    if (!fileName) return new Response("File name not specified.", { status: 400 });
-    const r2Url = `https://${R2_PUBLIC_URL}/${fileName}`;
-    const range = req.headers.get("Range");
-    const fetchOptions = { method: "GET", headers: {} };
-    if (range) fetchOptions.headers["Range"] = range;
-    try {
-      const r2Response = await fetch(r2Url, fetchOptions);
-      if (!r2Response.ok && r2Response.status !== 206) {
-        return new Response(r2Response.body, {status: r2Response.status,statusText: r2Response.statusText,});
-      }
-      const headers = new Headers(r2Response.headers);
-      headers.set("Cache-Control", "public, max-age=604800"); 
-      headers.set("Access-Control-Allow-Origin", "*");
-      headers.set("Accept-Ranges", "bytes");
-      headers.set("Content-Disposition", `inline; filename="${fileName}"`);
-      return new Response(r2Response.body, {status: r2Response.status,statusText: r2Response.statusText,headers: headers,});
-    } catch (err) {
-      console.error("Proxy Error (/image):", err);
-      return new Response("Proxy failed.", { status: 500 });
-    }
-  }
-
-  // --- 6F. Handle the Proxy Request (GET /download/...) (For Downloading) ---
-  if (req.method === "GET" && url.pathname.startsWith("/download/")) {
-    if (!R2_PUBLIC_URL) return new Response("R2_PUBLIC_URL not set.", { status: 500 });
-    const fileName = url.pathname.substring("/download/".length);
-    if (!fileName) return new Response("File name not specified.", { status: 400 });
-    const r2Url = `https://${R2_PUBLIC_URL}/${fileName}`;
-    const range = req.headers.get("Range");
-    const fetchOptions = { method: "GET", headers: {} };
-    if (range) fetchOptions.headers["Range"] = range;
-    try {
-      const r2Response = await fetch(r2Url, fetchOptions);
-      if (!r2Response.ok && r2Response.status !== 206) {
-        return new Response(r2Response.body, {status: r2Response.status,statusText: r2Response.statusText,});
-      }
-      const headers = new Headers(r2Response.headers);
-      headers.set("Cache-Control", "public, max-age=604800"); 
-      headers.set("Access-Control-Allow-Origin", "*");
-      headers.set("Accept-Ranges", "bytes");
-      headers.set("Content-Disposition", `attachment; filename="${fileName}"`);
-      return new Response(r2Response.body, {status: r2Response.status,statusText: r2Response.statusText,headers: headers,});
-    } catch (err) {
-      console.error("Proxy Error (/download):", err);
-      return new Response("Proxy failed.", { status: 500 });
-    }
-  }
-
-  // --- 6G. Handle the History Page (GET) ---
-  if (req.method === "GET" && url.pathname === "/history") {
-    
-    let html = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>Upload History</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <style>
-          :root {
-            --bg: #1a1a1a; --card-bg: #2a2a2a; --text: #f0f0f0; --text-dim: #888;
-            --accent: #007aff; --border: #333; --input-bg: #1f1f1f;
-          }
-          body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background: var(--bg); color: var(--text); margin: 0; padding: 1rem;
-          }
-          .container { max-width: 900px; margin: 2rem auto; }
-          .header {
-            display: flex; justify-content: space-between; align-items: center;
-            border-bottom: 1px solid var(--border); padding-bottom: 1rem;
-          }
-          h2 { margin: 0; }
-          a { color: var(--accent); text-decoration: none; }
-          .history-list { 
-            display: flex; flex-direction: column; gap: 1rem; margin-top: 1.5rem;
-            max-height: 70vh; overflow-y: auto; padding-right: 5px;
-          }
-          .history-item {
-            background: var(--card-bg); border-radius: 8px; padding: 1rem;
-            display: flex; flex-direction: column; gap: 1rem;
-          }
-          .file-name { font-weight: bold; word-break: break-all; }
-          .timestamp { font-size: 0.85em; color: var(--text-dim); }
-          .links-container { display: flex; flex-direction: column; gap: 0.75rem; }
-          .link-box { display: flex; flex-direction: column; gap: 0.5rem; }
-          .link-box strong { font-size: 0.9em; color: var(--text-dim); }
-          .link-input-group { display: flex; }
-          .link-box input[type="text"] {
-            flex: 1; font-size: 0.9rem; padding: 0.5rem; background: var(--input-bg);
-            border: 1px solid var(--border); border-right: none;
-            color: var(--text); border-radius: 4px 0 0 4px;
-          }
-          .copy-btn {
-            font-size: 0.9rem; padding: 0 0.75rem; background: var(--accent); color: white;
-            border: 1px solid var(--accent); border-radius: 0 4px 4px 0; cursor: pointer;
-          }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <div class="header">
-            <h2>Upload History</h2>
-            <a href="/">Back to Uploader</a>
-          </div>
-          <div class="history-list" id="history-list">
-    `;
-
-    const entries = kv.list({ prefix: ["uploads"] });
-    let count = 0;
-    for await (const entry of entries) {
-      const item = entry.value as any; 
-      const createdAt = new Date(item.createdAt);
-      html += `
-        <div class="history-item">
-          <div class="file-name">${item.fileName || 'N/A'}</div>
-          <div class="timestamp">Uploaded: ${formatTimeAgo(createdAt)} (${item.source || 'N/A'})</div>
-          <div class="links-container">
-            <div class="link-box">
-              <strong>No VPN (Proxy Play)</strong>
-              <div class="link-input-group">
-                <input type="text" value="${item.proxyUrl}" readonly>
-                <button class="copy-btn">Copy</button>
-              </div>
-            </div>
-            
-            <div class="link-box">
-              <strong>No VPN (Auto Download)</strong>
-              <div class="link-input-group">
-                <input type="text" value="${item.downloadUrl || 'N/A'}" readonly>
-                <button class="copy-btn">Copy</button>
-              </div>
-            </div>
-            
-            <div class="link-box">
-              <strong>R2 Original (Auto Download)</strong>
-              <div class="link-input-group">
-                <input type="text" value="${item.r2Url}" readonly>
-                <button class="copy-btn">Copy</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      `;
-      count++;
-    }
-    if (count === 0) html += `<div>No upload history found.</div>`;
-    html += `
-          </div> </div> <script>
-          document.body.addEventListener('click', (e) => {
-            if (e.target.classList.contains('copy-btn')) {
-              const inputField = e.target.closest('.link-input-group').querySelector('input[type="text"]');
-              if (inputField) {
-                inputField.select();
-                try {
-                  navigator.clipboard.writeText(inputField.value);
-                  e.target.textContent = 'Copied!';
-                  setTimeout(() => { e.target.textContent = 'Copy'; }, 2000);
-                } catch (err) { console.error('Copy failed', err); }
-              }
-            }
-          });
-        </script>
-      </body>
-      </html>
-    `;
-    return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } },);
-  }
-
-  // --- 7. Return 404 for other paths ---
   return new Response("Not Found", { status: 404 });
 });
