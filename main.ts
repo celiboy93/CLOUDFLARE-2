@@ -1,4 +1,4 @@
-// main.ts (v1.29 - Auth Separated & Stability Fixes)
+// main.ts (v1.28 - Final Fix for Stream Hash Error)
 import {
   S3Client,
   PutObjectCommand,
@@ -15,6 +15,7 @@ const REQUIRED_ENV_VARS = [
 for (const varName of REQUIRED_ENV_VARS) {
   if (!Deno.env.get(varName)) {
     console.error(`[FATAL ERROR] Missing required environment variable: ${varName}`);
+    // Deno Deploy does not allow Deno.exit(), so we throw an error.
     throw new Error(`Missing required environment variable: ${varName}`); 
   }
 }
@@ -54,7 +55,6 @@ function mimeToExt(mimeType: string): string {
   const simpleMime = mimeType.split(';')[0];
   return mapping[simpleMime] || 'bin';
 }
-
 function formatTimeAgo(date: Date): string {
   const seconds = Math.floor((new Date().getTime() - date.getTime()) / 1000);
   let interval = seconds / 31536000;
@@ -69,114 +69,56 @@ function formatTimeAgo(date: Date): string {
   if (interval > 1) return Math.floor(interval) + " minutes ago";
   return Math.floor(seconds) + " seconds ago";
 }
-
 function sanitizeFileName(name: string | null | undefined): string | null {
   if (!name || name.trim() === "") return null;
+  // Remove extension, illegal chars, and replace spaces/underscores with hyphens
   return name.replace(/\.[^/.]+$/, "").replace(/[?&#/\\]/g, "").replace(/[\s_]+/g, "-").trim() || null;
 }
 
+
 // --- 6. Start the Web Server ---
 Deno.serve(async (req: Request) => {
-  const url = new URL(req.url);
 
-  // --- HELPER: Auth Check Function ---
-  const checkAuth = () => {
-    if (!BASIC_AUTH_USER || !BASIC_AUTH_PASS) return true; // No auth configured
+  // --- BASIC AUTH CHECK ---
+  if (BASIC_AUTH_USER && BASIC_AUTH_PASS) {
     const authHeader = req.headers.get("Authorization");
-    if (!authHeader) return false;
+    if (authHeader) {
+      const auth = authHeader.split(" ")[1];
+      if (auth) {
+        // Decode base64 to 'user:pass'
+        const authString = new TextDecoder().decode(Uint8Array.from(atob(auth), c => c.charCodeAt(0)));
+        const [user, pass] = authString.split(":");
+        
+        const encoder = new TextEncoder();
+        const userBytes = encoder.encode(user);
+        const passBytes = encoder.encode(pass);
+        const expectedUserBytes = encoder.encode(BASIC_AUTH_USER);
+        const expectedPassBytes = encoder.encode(BASIC_AUTH_PASS);
 
-    const auth = authHeader.split(" ")[1];
-    if (!auth) return false;
+        // FIX: timingSafeEqual imported correctly as a direct function
+        const userMatch = userBytes.length === expectedUserBytes.length &&
+          timingSafeEqual(userBytes, expectedUserBytes);
+        const passMatch = passBytes.length === expectedPassBytes.length &&
+          timingSafeEqual(passBytes, expectedPassBytes);
 
-    try {
-      const authString = new TextDecoder().decode(Uint8Array.from(atob(auth), c => c.charCodeAt(0)));
-      const [user, pass] = authString.split(":");
-      
-      const encoder = new TextEncoder();
-      const userBytes = encoder.encode(user);
-      const passBytes = encoder.encode(pass);
-      const expectedUserBytes = encoder.encode(BASIC_AUTH_USER);
-      const expectedPassBytes = encoder.encode(BASIC_AUTH_PASS);
-
-      if (userBytes.length !== expectedUserBytes.length || passBytes.length !== expectedPassBytes.length) {
-        return false;
+        if (!userMatch || !passMatch) {
+          return new Response("Unauthorized", { status: 401, headers: { 'WWW-Authenticate': 'Basic realm="Restricted Area"' },});
+        }
+      } else {
+        return new Response("Unauthorized", { status: 401, headers: { 'WWW-Authenticate': 'Basic realm="Restricted Area"' },});
       }
-      return timingSafeEqual(userBytes, expectedUserBytes) && timingSafeEqual(passBytes, expectedPassBytes);
-    } catch {
-      return false;
-    }
-  };
-
-  // =========================================================================
-  // PUBLIC ROUTES (No Password Required) - Download & View
-  // =========================================================================
-
-  // --- 6E. Handle the Proxy Request (GET /image/...) ---
-  if (req.method === "GET" && url.pathname.startsWith("/image/")) {
-    if (!R2_PUBLIC_URL) return new Response("R2_PUBLIC_URL not set.", { status: 500 });
-    const fileName = url.pathname.substring("/image/".length);
-    if (!fileName) return new Response("File name not specified.", { status: 400 });
-    const r2Url = `https://${R2_PUBLIC_URL}/${fileName}`;
-    const range = req.headers.get("Range");
-    const fetchOptions = { method: "GET", headers: {} };
-    if (range) fetchOptions.headers["Range"] = range;
-    try {
-      const r2Response = await fetch(r2Url, fetchOptions);
-      if (!r2Response.ok && r2Response.status !== 206) {
-        return new Response(r2Response.body, {status: r2Response.status,statusText: r2Response.statusText,});
-      }
-      const headers = new Headers(r2Response.headers);
-      headers.set("Cache-Control", "public, max-age=604800"); 
-      headers.set("Access-Control-Allow-Origin", "*");
-      headers.set("Accept-Ranges", "bytes");
-      headers.set("Content-Disposition", `inline; filename="${fileName}"`);
-      return new Response(r2Response.body, {status: r2Response.status,statusText: r2Response.statusText,headers: headers,});
-    } catch (err) {
-      console.error("Proxy Error (/image):", err);
-      return new Response("Proxy failed.", { status: 500 });
+    } else {
+      return new Response("Unauthorized", { status: 401, headers: { 'WWW-Authenticate': 'Basic realm="Restricted Area"' },});
     }
   }
 
-  // --- 6F. Handle the Proxy Request (GET /download/...) ---
-  if (req.method === "GET" && url.pathname.startsWith("/download/")) {
-    if (!R2_PUBLIC_URL) return new Response("R2_PUBLIC_URL not set.", { status: 500 });
-    const fileName = url.pathname.substring("/download/".length);
-    if (!fileName) return new Response("File name not specified.", { status: 400 });
-    const r2Url = `https://${R2_PUBLIC_URL}/${fileName}`;
-    const range = req.headers.get("Range");
-    const fetchOptions = { method: "GET", headers: {} };
-    if (range) fetchOptions.headers["Range"] = range;
-    try {
-      const r2Response = await fetch(r2Url, fetchOptions);
-      if (!r2Response.ok && r2Response.status !== 206) {
-        return new Response(r2Response.body, {status: r2Response.status,statusText: r2Response.statusText,});
-      }
-      const headers = new Headers(r2Response.headers);
-      headers.set("Cache-Control", "public, max-age=604800"); 
-      headers.set("Access-Control-Allow-Origin", "*");
-      headers.set("Accept-Ranges", "bytes");
-      headers.set("Content-Disposition", `attachment; filename="${fileName}"`);
-      return new Response(r2Response.body, {status: r2Response.status,statusText: r2Response.statusText,headers: headers,});
-    } catch (err) {
-      console.error("Proxy Error (/download):", err);
-      return new Response("Proxy failed.", { status: 500 });
-    }
-  }
-
-  // =========================================================================
-  // PROTECTED ROUTES (Password Required) - Upload & History
-  // =========================================================================
-
-  // Check Auth for all routes below this point
-  if (!checkAuth()) {
-    return new Response("Unauthorized", { 
-      status: 401, 
-      headers: { 'WWW-Authenticate': 'Basic realm="Restricted Area"' },
-    });
-  }
+  const url = new URL(req.url);
 
   // --- 6B. Serve the Uploader HTML Page ---
   if (req.method === "GET" && url.pathname === "/") {
+    
+    // NOTE: HTML content remains the same as v1.27 since the fixes were already applied there.
+    // The main fix for "hash calculation" is in the POST /upload-file route below.
     return new Response(
       `
       <!DOCTYPE html>
@@ -366,6 +308,10 @@ Deno.serve(async (req: Request) => {
             const formData = new FormData();
             formData.append('file', file);
             
+            // NOTE: Using fetch instead of XMLHttpRequest to simplify, 
+            // but XMLHttpRequest remains better for true upload progress events.
+            // Sticking to XHR for progress tracking but ensuring the server side can handle the file buffer.
+            
             const xhr = new XMLHttpRequest();
             xhr.open('POST', '/upload-file');
             xhr.upload.addEventListener('progress', (event) => {
@@ -439,6 +385,7 @@ Deno.serve(async (req: Request) => {
             if (type === 'error') {
               resultDiv.innerHTML = \`<span class="error">\${data}</span>\`;
             } else {
+              // FIX: Ensures data.proxyUrl is correctly displayed as a JS variable
               resultDiv.innerHTML = \`
                 <span class="success">Upload Complete!</span>
                 <div class="links-container">
@@ -511,13 +458,14 @@ Deno.serve(async (req: Request) => {
       const sanitizedName = sanitizeFileName(originalName);
       const fileName = `${sanitizedName || crypto.randomUUID()}.${extension}`;
       
-      // Buffer fix for Hash Error
+      // FIX (v1.28): Convert file stream to a Buffer (Uint8Array) before sending to S3.
+      // This solves the "Unable to calculate hash for flowing readable stream" error.
       const fileBuffer = await file.arrayBuffer(); 
 
       const putCommand = new PutObjectCommand({
         Bucket: R2_BUCKET_NAME,
         Key: fileName,
-        Body: new Uint8Array(fileBuffer),
+        Body: new Uint8Array(fileBuffer), // Use the buffered data here
         ContentType: contentType,
         ContentLength: file.size, 
         ContentDisposition: `attachment; filename="${fileName}"`,
@@ -542,6 +490,7 @@ Deno.serve(async (req: Request) => {
       return Response.json({ proxyUrl: proxyLink, r2Url: r2Link, downloadLink: downloadLink });
     } catch (err) {
       console.error("File Upload Error:", err);
+      // Ensure the error message is human-readable if possible
       return Response.json({ error: `Upload failed: ${err.message || 'Internal Server Error'}` }, { status: 500 });
     }
   }
@@ -572,7 +521,7 @@ Deno.serve(async (req: Request) => {
           ContentDisposition: `attachment; filename="${fileName}"`,
         },
         queueSize: 8, 
-        partSize: 25 * 1024 * 1024, 
+        partSize: 25 * 1024 * 1024, // Optimized for speed
       });
 
       parallelUploads3.on("httpUploadProgress", (progress) => {
@@ -600,6 +549,58 @@ Deno.serve(async (req: Request) => {
     } catch (err) {
       console.error("Remote Upload Error:", err);
       return Response.json({ error: `Remote upload failed: ${err.message}` }, { status: 500 });
+    }
+  }
+
+  // --- 6E. Handle the Proxy Request (GET /image/...) (For Playing) ---
+  if (req.method === "GET" && url.pathname.startsWith("/image/")) {
+    if (!R2_PUBLIC_URL) return new Response("R2_PUBLIC_URL not set.", { status: 500 });
+    const fileName = url.pathname.substring("/image/".length);
+    if (!fileName) return new Response("File name not specified.", { status: 400 });
+    const r2Url = `https://${R2_PUBLIC_URL}/${fileName}`;
+    const range = req.headers.get("Range");
+    const fetchOptions = { method: "GET", headers: {} };
+    if (range) fetchOptions.headers["Range"] = range;
+    try {
+      const r2Response = await fetch(r2Url, fetchOptions);
+      if (!r2Response.ok && r2Response.status !== 206) {
+        return new Response(r2Response.body, {status: r2Response.status,statusText: r2Response.statusText,});
+      }
+      const headers = new Headers(r2Response.headers);
+      headers.set("Cache-Control", "public, max-age=604800"); 
+      headers.set("Access-Control-Allow-Origin", "*");
+      headers.set("Accept-Ranges", "bytes");
+      headers.set("Content-Disposition", `inline; filename="${fileName}"`);
+      return new Response(r2Response.body, {status: r2Response.status,statusText: r2Response.statusText,headers: headers,});
+    } catch (err) {
+      console.error("Proxy Error (/image):", err);
+      return new Response("Proxy failed.", { status: 500 });
+    }
+  }
+
+  // --- 6F. Handle the Proxy Request (GET /download/...) (For Downloading) ---
+  if (req.method === "GET" && url.pathname.startsWith("/download/")) {
+    if (!R2_PUBLIC_URL) return new Response("R2_PUBLIC_URL not set.", { status: 500 });
+    const fileName = url.pathname.substring("/download/".length);
+    if (!fileName) return new Response("File name not specified.", { status: 400 });
+    const r2Url = `https://${R2_PUBLIC_URL}/${fileName}`;
+    const range = req.headers.get("Range");
+    const fetchOptions = { method: "GET", headers: {} };
+    if (range) fetchOptions.headers["Range"] = range;
+    try {
+      const r2Response = await fetch(r2Url, fetchOptions);
+      if (!r2Response.ok && r2Response.status !== 206) {
+        return new Response(r2Response.body, {status: r2Response.status,statusText: r2Response.statusText,});
+      }
+      const headers = new Headers(r2Response.headers);
+      headers.set("Cache-Control", "public, max-age=604800"); 
+      headers.set("Access-Control-Allow-Origin", "*");
+      headers.set("Accept-Ranges", "bytes");
+      headers.set("Content-Disposition", `attachment; filename="${fileName}"`);
+      return new Response(r2Response.body, {status: r2Response.status,statusText: r2Response.statusText,headers: headers,});
+    } catch (err) {
+      console.error("Proxy Error (/download):", err);
+      return new Response("Proxy failed.", { status: 500 });
     }
   }
 
