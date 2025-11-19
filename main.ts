@@ -17,18 +17,10 @@ const S3 = new S3Client({
 
 Deno.serve(async (req) => {
   const url = new URL(req.url);
-  let fileName = decodeURIComponent(url.pathname.slice(1));
-  let isProxyMode = false;
-
-  // Check if user wants Proxy Mode (VPN Free)
-  // Link format: domain.com/play/movie.mp4
-  if (url.pathname.startsWith("/play/")) {
-    isProxyMode = true;
-    fileName = decodeURIComponent(url.pathname.replace("/play/", ""));
-  }
+  const fileName = decodeURIComponent(url.pathname.slice(1));
 
   if (fileName === "" || fileName === "favicon.ico") {
-    return new Response("Server Ready", { status: 200 });
+    return new Response("Movie Server Running", { status: 200 });
   }
 
   try {
@@ -37,26 +29,10 @@ Deno.serve(async (req) => {
       Key: fileName,
     });
 
-    // Generate Signed URL (3 Hours)
+    // 10800 seconds = 3 hours
     const signedUrl = await getSignedUrl(S3, command, { expiresIn: 10800 });
 
-    if (isProxyMode) {
-      // PROXY MODE: Deno fetches and streams to user (Uses Deno Bandwidth)
-      const response = await fetch(signedUrl);
-      
-      // Pass original headers (Content-Type, Content-Length) for video players
-      const newHeaders = new Headers(response.headers);
-      newHeaders.set("Access-Control-Allow-Origin", "*"); // Allow CORS
-
-      return new Response(response.body, {
-        status: response.status,
-        headers: newHeaders,
-      });
-
-    } else {
-      // REDIRECT MODE: Direct to R2 (Saves Bandwidth)
-      return Response.redirect(signedUrl, 302);
-    }
+    return Response.redirect(signedUrl, 302);
 
   } catch (error) {
     return new Response("File not found", { status: 404 });
