@@ -54,7 +54,7 @@ Deno.serve(async (req: Request) => {
     } else return new Response("Unauthorized", {status:401, headers:{'WWW-Authenticate':'Basic realm="Restricted"'}});
   }
 
-  // --- ROUTE 1: UPLOADER UI (FIXED TABS) ---
+  // --- ROUTE 1: UPLOADER UI ---
   if (req.method === "GET" && url.pathname === "/") {
     return new Response(`<!DOCTYPE html><html><head><title>R2 Uploader</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>
       :root{--bg:#111;--card:#222;--text:#eee;--accent:#3b82f6;--border:#333;}
@@ -71,20 +71,24 @@ Deno.serve(async (req: Request) => {
       input{width:100%;padding:0.8rem;background:#000;border:1px solid var(--border);color:#fff;border-radius:6px;box-sizing:border-box;margin-bottom:0.5rem;}
       #fileBox{border:2px dashed #555;padding:2rem;text-align:center;border-radius:8px;cursor:pointer;}
       #fileBox:hover{background:#2a2a2a;border-color:var(--accent);}
-      .res{margin-top:1rem;font-size:0.9rem;} .res input{margin-bottom:0.3rem;font-family:monospace;color:#4ade80;}
+      .res{margin-top:1.5rem;font-size:0.9rem;} 
+      .link-row {margin-bottom:10px;}
+      .link-label {font-size:0.75rem; color:#888; margin-bottom:2px;}
+      .link-group {display:flex;}
+      .link-group input {margin-bottom:0; border-radius: 4px 0 0 4px; border-right:none;}
+      .copy-btn {background:var(--accent); color:white; border:none; padding:0 12px; border-radius:0 4px 4px 0; cursor:pointer;}
+      .copy-btn:hover {filter:brightness(1.1);}
       .bar-box{height:6px;background:#333;border-radius:3px;margin-top:10px;overflow:hidden;display:none;}
       .bar{height:100%;background:var(--accent);width:0%;transition:0.2s;}
     </style></head><body>
     <div class="box">
       <div class="head"><h2>R2 Uploader</h2><a href="/history">History</a></div>
       
-      <!-- FIXED TABS -->
       <div class="tabs">
         <button class="tab active" id="tab-btn-file" onclick="openTab('file')">File Upload</button>
         <button class="tab" id="tab-btn-url" onclick="openTab('url')">Remote URL</button>
       </div>
       
-      <!-- FILE CONTENT -->
       <div id="view-file" class="content active">
         <form id="fForm">
           <label id="fileBox"><input type="file" id="file" hidden><span>Click to Choose File</span><div id="fName" style="color:#888;font-size:0.8em;margin-top:5px"></div></label>
@@ -92,7 +96,6 @@ Deno.serve(async (req: Request) => {
         </form>
       </div>
       
-      <!-- URL CONTENT -->
       <div id="view-url" class="content">
         <form id="uForm">
             <input id="urlInput" placeholder="https://example.com/video.mp4" type="url" required>
@@ -105,17 +108,11 @@ Deno.serve(async (req: Request) => {
       <div id="res" class="res"></div>
     </div>
     <script>
-      // TAB SWITCHING LOGIC
       function openTab(name) {
-          // Hide all content
           document.querySelectorAll('.content').forEach(el => el.classList.remove('active'));
           document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
-          
-          // Show selected
           document.getElementById('view-' + name).classList.add('active');
           document.getElementById('tab-btn-' + name).classList.add('active');
-          
-          // Reset Status
           document.getElementById('res').innerHTML = '';
           document.getElementById('progBox').style.display = 'none';
       }
@@ -154,12 +151,42 @@ Deno.serve(async (req: Request) => {
           upload('/upload-remote', payload, document.getElementById('uBtn'), true);
       };
       
+      function copyTxt(btn, txt) {
+          navigator.clipboard.writeText(txt).then(() => {
+              btn.innerText = '✓';
+              setTimeout(() => btn.innerText = 'Copy', 2000);
+          });
+      }
+
       function show(d){
           const res = document.getElementById('res');
-          res.innerHTML='<div style="color:#4ade80;margin-bottom:5px">✓ Success!</div>'+
-          '<input readonly onclick="this.select()" value="'+d.proxy+'">'+
-          '<input readonly onclick="this.select()" value="'+d.dl+'">'+
-          '<input readonly onclick="this.select()" value="'+d.r2+'">';
+          res.innerHTML = \`
+            <div style="color:#4ade80;margin-bottom:10px;text-align:center">✓ Upload Successful!</div>
+            
+            <div class="link-row">
+                <div class="link-label">Proxy Play (Deno Bandwidth)</div>
+                <div class="link-group">
+                    <input readonly value="\${d.proxy}" onclick="this.select()">
+                    <button class="copy-btn" onclick="copyTxt(this, '\${d.proxy}')">Copy</button>
+                </div>
+            </div>
+
+            <div class="link-row">
+                <div class="link-label">Proxy Download (Deno Bandwidth)</div>
+                <div class="link-group">
+                    <input readonly value="\${d.dl}" onclick="this.select()">
+                    <button class="copy-btn" onclick="copyTxt(this, '\${d.dl}')">Copy</button>
+                </div>
+            </div>
+
+            <div class="link-row">
+                <div class="link-label">R2 Direct (Saves Bandwidth - Recommended)</div>
+                <div class="link-group">
+                    <input readonly value="\${d.r2}" onclick="this.select()">
+                    <button class="copy-btn" onclick="copyTxt(this, '\${d.r2}')">Copy</button>
+                </div>
+            </div>
+          \`;
       }
     </script></body></html>`, {headers:{"content-type":"text/html"}});
   }
@@ -232,7 +259,19 @@ Deno.serve(async (req: Request) => {
         <div class="item">
           <div class="top"><b>${v.fileName}</b><button onclick='del(${key})'>Remove List</button></div>
           <div class="meta">${formatTimeAgo(new Date(v.createdAt))} • ${v.source}</div>
-          <input readonly onclick="this.select()" value="${v.proxyUrl}">
+          
+          <div class="link-group">
+            <input readonly value="${v.proxyUrl}" onclick="this.select()">
+            <button class="copy-btn" onclick="copyTxt(this, '${v.proxyUrl}')">Copy</button>
+          </div>
+          <div class="link-group">
+            <input readonly value="${v.downloadUrl}" onclick="this.select()">
+            <button class="copy-btn" onclick="copyTxt(this, '${v.downloadUrl}')">Copy</button>
+          </div>
+          <div class="link-group">
+            <input readonly value="${v.r2Url}" onclick="this.select()">
+            <button class="copy-btn" onclick="copyTxt(this, '${v.r2Url}')">Copy</button>
+          </div>
         </div>`;
     }
     return new Response(`<!DOCTYPE html><html><head><title>History</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>
@@ -242,12 +281,21 @@ Deno.serve(async (req: Request) => {
       .top{display:flex;justify-content:space-between;align-items:center;}
       button{background:#ef4444;color:#fff;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:0.8rem;}
       .meta{font-size:0.8rem;color:#888;margin:5px 0;}
-      input{background:#000;border:1px solid #333;color:#4ade80;width:100%;padding:5px;border-radius:4px;box-sizing:border-box;}
+      .link-group{display:flex;margin-top:5px;}
+      input{background:#000;border:1px solid #333;color:#4ade80;flex:1;padding:5px;border-radius:4px 0 0 4px;border-right:none;}
+      .copy-btn{background:#3b82f6;color:white;border:none;padding:0 10px;border-radius:0 4px 4px 0;cursor:pointer;}
     </style><script>
       async function del(k){
         if(!confirm("Remove from history list? (File remains on Cloud)"))return;
         await fetch('/api/delete-history',{method:'POST',body:JSON.stringify({key:k})});
         location.reload();
+      }
+      function copyTxt(btn, txt) {
+          navigator.clipboard.writeText(txt).then(() => {
+              const original = btn.innerText;
+              btn.innerText = '✓';
+              setTimeout(() => btn.innerText = original, 2000);
+          });
       }
     </script></head><body>
       <div class="head"><h2>History</h2><a href="/">Back</a></div>
