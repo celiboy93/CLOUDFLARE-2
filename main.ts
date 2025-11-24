@@ -80,6 +80,7 @@ Deno.serve(async (req: Request) => {
       .copy-btn:hover {filter:brightness(1.1);}
       .bar-box{height:6px;background:#333;border-radius:3px;margin-top:10px;overflow:hidden;display:none;}
       .bar{height:100%;background:var(--accent);width:0%;transition:0.2s;}
+      #progText {text-align:center; font-size:0.8rem; color:#888; margin-top:5px; display:none;}
     </style></head><body>
     <div class="box">
       <div class="head"><h2>R2 Uploader</h2><a href="/history">History</a></div>
@@ -105,6 +106,7 @@ Deno.serve(async (req: Request) => {
       </div>
 
       <div class="bar-box" id="progBox"><div class="bar" id="bar"></div></div>
+      <div id="progText">0%</div>
       <div id="res" class="res"></div>
     </div>
     <script>
@@ -114,47 +116,101 @@ Deno.serve(async (req: Request) => {
           document.getElementById('view-' + name).classList.add('active');
           document.getElementById('tab-btn-' + name).classList.add('active');
           document.getElementById('res').innerHTML = '';
-          document.getElementById('progBox').style.display = 'none';
+          resetProg();
       }
 
       const fIn=document.getElementById('file'), fName=document.getElementById('fName'), fBtn=document.getElementById('fBtn');
       fIn.onchange=()=>{if(fIn.files.length){fName.innerText=fIn.files[0].name;fBtn.disabled=false;}else{fName.innerText='';fBtn.disabled=true;}};
       
-      function upload(url, body, btn, isJson=false){
-        btn.disabled=true; btn.innerText='Uploading...'; document.getElementById('progBox').style.display='block'; document.getElementById('bar').style.width='0%';
-        const xhr=new XMLHttpRequest(); xhr.open('POST', url);
-        if(isJson) xhr.setRequestHeader('Content-Type', 'application/json');
-        
-        xhr.upload.onprogress=e=>{if(e.lengthComputable)document.getElementById('bar').style.width=(e.loaded/e.total)*100+'%'};
-        
-        xhr.onload=()=>{
-          btn.disabled=false; btn.innerText='Upload'; document.getElementById('progBox').style.display='none';
-          try{const d=JSON.parse(xhr.responseText); xhr.status===200?show(d):alert(d.error)}catch(e){alert('Error: '+xhr.responseText)}
-        };
-        
-        xhr.onerror=()=>{ btn.disabled=false; btn.innerText='Upload'; alert('Network Error'); };
-        xhr.send(body);
+      function resetProg(){
+          document.getElementById('progBox').style.display='none';
+          document.getElementById('progText').style.display='none';
+          document.getElementById('bar').style.width='0%';
+          document.getElementById('progText').innerText='0%';
       }
-      
+
+      function updateProg(pct, msg) {
+          document.getElementById('progBox').style.display='block';
+          document.getElementById('progText').style.display='block';
+          document.getElementById('bar').style.width = pct + '%';
+          document.getElementById('progText').innerText = pct + '% ' + (msg || '');
+      }
+
+      // 1. Standard File Upload
       document.getElementById('fForm').onsubmit=e=>{
           e.preventDefault(); 
           const fd=new FormData(); fd.append('file',fIn.files[0]); 
-          upload('/upload-file', fd, fBtn);
+          const btn = fBtn; btn.disabled=true; btn.innerText='Uploading...';
+          
+          const xhr=new XMLHttpRequest(); 
+          xhr.open('POST', '/upload-file');
+          xhr.upload.onprogress=e=>{if(e.lengthComputable) updateProg(Math.round((e.loaded/e.total)*100));};
+          xhr.onload=()=>{
+              btn.disabled=false; btn.innerText='Upload'; resetProg();
+              try{const d=JSON.parse(xhr.responseText); xhr.status===200?show(d):alert(d.error)}catch(e){alert('Error: '+xhr.responseText)}
+          };
+          xhr.onerror=()=>{ btn.disabled=false; btn.innerText='Upload'; alert('Network Error'); };
+          xhr.send(fd);
       };
       
-      document.getElementById('uForm').onsubmit=e=>{
+      // 2. Remote URL Upload (Streaming Progress)
+      document.getElementById('uForm').onsubmit=async e=>{
           e.preventDefault(); 
-          const payload = JSON.stringify({
-              url: document.getElementById('urlInput').value, 
-              name: document.getElementById('nameInput').value
-          });
-          upload('/upload-remote', payload, document.getElementById('uBtn'), true);
+          const btn = document.getElementById('uBtn');
+          const url = document.getElementById('urlInput').value;
+          const name = document.getElementById('nameInput').value;
+          
+          btn.disabled=true; btn.innerText='Uploading...'; 
+          updateProg(0, 'Starting...');
+
+          try {
+              const response = await fetch('/upload-remote', {
+                  method: 'POST',
+                  headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({url, name})
+              });
+
+              if (!response.ok && response.headers.get('content-type') === 'application/json') {
+                  const err = await response.json(); throw new Error(err.error);
+              }
+
+              // Stream Reader
+              const reader = response.body.getReader();
+              const decoder = new TextDecoder();
+              let buffer = '';
+
+              while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  
+                  buffer += decoder.decode(value, { stream: true });
+                  const lines = buffer.split('\\n');
+                  buffer = lines.pop(); // Keep incomplete line
+
+                  for (const line of lines) {
+                      if (!line.trim()) continue;
+                      try {
+                          const msg = JSON.parse(line);
+                          if (msg.progress) {
+                              updateProg(msg.progress, 'Processing...');
+                          } else if (msg.done) {
+                              show(msg.done);
+                          } else if (msg.error) {
+                              throw new Error(msg.error);
+                          }
+                      } catch (e) { console.log('Parse error', e); }
+                  }
+              }
+          } catch (e) {
+              alert("Error: " + e.message);
+          } finally {
+              btn.disabled=false; btn.innerText='Remote Upload'; resetProg();
+          }
       };
       
       function copyTxt(btn, txt) {
           navigator.clipboard.writeText(txt).then(() => {
-              btn.innerText = '✓';
-              setTimeout(() => btn.innerText = 'Copy', 2000);
+              btn.innerText = '✓'; setTimeout(() => btn.innerText = 'Copy', 2000);
           });
       }
 
@@ -162,36 +218,18 @@ Deno.serve(async (req: Request) => {
           const res = document.getElementById('res');
           res.innerHTML = \`
             <div style="color:#4ade80;margin-bottom:10px;text-align:center">✓ Upload Successful!</div>
-            
-            <div class="link-row">
-                <div class="link-label">Proxy Play (Deno Bandwidth)</div>
-                <div class="link-group">
-                    <input readonly value="\${d.proxy}" onclick="this.select()">
-                    <button class="copy-btn" onclick="copyTxt(this, '\${d.proxy}')">Copy</button>
-                </div>
-            </div>
-
-            <div class="link-row">
-                <div class="link-label">Proxy Download (Deno Bandwidth)</div>
-                <div class="link-group">
-                    <input readonly value="\${d.dl}" onclick="this.select()">
-                    <button class="copy-btn" onclick="copyTxt(this, '\${d.dl}')">Copy</button>
-                </div>
-            </div>
-
-            <div class="link-row">
-                <div class="link-label">R2 Direct (Saves Bandwidth - Recommended)</div>
-                <div class="link-group">
-                    <input readonly value="\${d.r2}" onclick="this.select()">
-                    <button class="copy-btn" onclick="copyTxt(this, '\${d.r2}')">Copy</button>
-                </div>
-            </div>
+            <div class="link-row"><div class="link-label">Proxy Play (Deno Bandwidth)</div>
+                <div class="link-group"><input readonly value="\${d.proxy}" onclick="this.select()"><button class="copy-btn" onclick="copyTxt(this, '\${d.proxy}')">Copy</button></div></div>
+            <div class="link-row"><div class="link-label">Proxy Download (Deno Bandwidth)</div>
+                <div class="link-group"><input readonly value="\${d.dl}" onclick="this.select()"><button class="copy-btn" onclick="copyTxt(this, '\${d.dl}')">Copy</button></div></div>
+            <div class="link-row"><div class="link-label">R2 Direct (Saves Bandwidth)</div>
+                <div class="link-group"><input readonly value="\${d.r2}" onclick="this.select()"><button class="copy-btn" onclick="copyTxt(this, '\${d.r2}')">Copy</button></div></div>
           \`;
       }
     </script></body></html>`, {headers:{"content-type":"text/html"}});
   }
 
-  // --- ROUTE 2: UPLOAD FILE (STREAMING) ---
+  // --- ROUTE 2: UPLOAD FILE (Standard) ---
   if (req.method === "POST" && url.pathname === "/upload-file") {
     try {
       const formData = await req.formData();
@@ -214,25 +252,49 @@ Deno.serve(async (req: Request) => {
     } catch (e) { return Response.json({error:e.message},{status:500}); }
   }
 
-  // --- ROUTE 3: REMOTE UPLOAD (STREAMING) ---
+  // --- ROUTE 3: REMOTE UPLOAD (Streaming Progress) ---
   if (req.method === "POST" && url.pathname === "/upload-remote") {
-    try {
-      const {url:u, name:n} = await req.json();
-      const r = await fetch(u); if(!r.ok) throw new Error("Fetch failed: " + r.status);
-      const ext = mimeToExt(r.headers.get("content-type")||"");
-      const fileName = `${sanitize(n)||crypto.randomUUID()}.${ext}`;
-      
-      const upload = new Upload({
-        client: s3Client,
-        params: { Bucket: R2_BUCKET_NAME, Key: fileName, Body: r.body as any, ContentType: r.headers.get("content-type")||"application/octet-stream" },
-        queueSize: 4, partSize: 10 * 1024 * 1024
-      });
-      await upload.done();
+    const body = new ReadableStream({
+      async start(controller) {
+        const enc = new TextEncoder();
+        const push = (data: any) => controller.enqueue(enc.encode(JSON.stringify(data) + "\n"));
+        
+        try {
+          const {url:u, name:n} = await req.json();
+          const r = await fetch(u);
+          if(!r.ok) throw new Error("Fetch failed: " + r.status);
+          
+          const totalSize = parseInt(r.headers.get("content-length") || "0");
+          const ext = mimeToExt(r.headers.get("content-type")||"");
+          const fileName = `${sanitize(n)||crypto.randomUUID()}.${ext}`;
+          
+          const upload = new Upload({
+            client: s3Client,
+            params: { Bucket: R2_BUCKET_NAME, Key: fileName, Body: r.body as any, ContentType: r.headers.get("content-type")||"application/octet-stream" },
+            queueSize: 4, partSize: 10 * 1024 * 1024
+          });
 
-      const data = { id: crypto.randomUUID(), fileName, proxyUrl: `https://${url.host}/image/${fileName}`, r2Url: `https://${R2_PUBLIC_URL}/${fileName}`, downloadUrl: `https://${url.host}/download/${fileName}`, createdAt: new Date(), source: "URL" };
-      await kv.set(["uploads", MAX_DATE_MS - Date.now(), data.id], data);
-      return Response.json({proxy:data.proxyUrl, r2:data.r2Url, dl:data.downloadUrl});
-    } catch (e) { return Response.json({error:e.message},{status:500}); }
+          // Monitor Progress
+          upload.on("httpUploadProgress", (progress) => {
+            if (totalSize > 0 && progress.loaded) {
+              const pct = Math.round((progress.loaded / totalSize) * 100);
+              push({ progress: pct });
+            }
+          });
+
+          await upload.done();
+
+          const data = { id: crypto.randomUUID(), fileName, proxyUrl: `https://${url.host}/image/${fileName}`, r2Url: `https://${R2_PUBLIC_URL}/${fileName}`, downloadUrl: `https://${url.host}/download/${fileName}`, createdAt: new Date(), source: "URL" };
+          await kv.set(["uploads", MAX_DATE_MS - Date.now(), data.id], data);
+          
+          push({ done: {proxy:data.proxyUrl, r2:data.r2Url, dl:data.downloadUrl} });
+        } catch (e) {
+          push({ error: e.message });
+        }
+        controller.close();
+      }
+    });
+    return new Response(body, { headers: { "Content-Type": "application/x-ndjson" } });
   }
 
   // --- ROUTE 4: PROXY & DOWNLOAD ---
@@ -259,19 +321,9 @@ Deno.serve(async (req: Request) => {
         <div class="item">
           <div class="top"><b>${v.fileName}</b><button onclick='del(${key})'>Remove List</button></div>
           <div class="meta">${formatTimeAgo(new Date(v.createdAt))} • ${v.source}</div>
-          
-          <div class="link-group">
-            <input readonly value="${v.proxyUrl}" onclick="this.select()">
-            <button class="copy-btn" onclick="copyTxt(this, '${v.proxyUrl}')">Copy</button>
-          </div>
-          <div class="link-group">
-            <input readonly value="${v.downloadUrl}" onclick="this.select()">
-            <button class="copy-btn" onclick="copyTxt(this, '${v.downloadUrl}')">Copy</button>
-          </div>
-          <div class="link-group">
-            <input readonly value="${v.r2Url}" onclick="this.select()">
-            <button class="copy-btn" onclick="copyTxt(this, '${v.r2Url}')">Copy</button>
-          </div>
+          <div class="link-group"><input readonly value="${v.proxyUrl}" onclick="this.select()"><button class="copy-btn" onclick="copyTxt(this, '${v.proxyUrl}')">Copy</button></div>
+          <div class="link-group"><input readonly value="${v.downloadUrl}" onclick="this.select()"><button class="copy-btn" onclick="copyTxt(this, '${v.downloadUrl}')">Copy</button></div>
+          <div class="link-group"><input readonly value="${v.r2Url}" onclick="this.select()"><button class="copy-btn" onclick="copyTxt(this, '${v.r2Url}')">Copy</button></div>
         </div>`;
     }
     return new Response(`<!DOCTYPE html><html><head><title>History</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>
@@ -292,8 +344,7 @@ Deno.serve(async (req: Request) => {
       }
       function copyTxt(btn, txt) {
           navigator.clipboard.writeText(txt).then(() => {
-              const original = btn.innerText;
-              btn.innerText = '✓';
+              const original = btn.innerText; btn.innerText = '✓';
               setTimeout(() => btn.innerText = original, 2000);
           });
       }
