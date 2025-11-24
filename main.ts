@@ -2,7 +2,7 @@ import { S3Client } from "npm:@aws-sdk/client-s3";
 import { Upload } from "npm:@aws-sdk/lib-storage";
 import { timingSafeEqual } from "jsr:@std/crypto/timing-safe-equal";
 
-// --- 1. CONFIGURATION & SECRETS ---
+// --- 1. CONFIGURATION ---
 const REQUIRED_ENV_VARS = ["R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET_NAME", "R2_PUBLIC_URL"];
 for (const v of REQUIRED_ENV_VARS) if (!Deno.env.get(v)) throw new Error(`Missing: ${v}`);
 
@@ -49,12 +49,12 @@ Deno.serve(async (req: Request) => {
       const [u, p] = new TextDecoder().decode(Uint8Array.from(atob(auth.split(" ")[1]), c=>c.charCodeAt(0))).split(":");
       const enc = new TextEncoder();
       if (timingSafeEqual(enc.encode(u), enc.encode(BASIC_AUTH_USER)) && timingSafeEqual(enc.encode(p), enc.encode(BASIC_AUTH_PASS))) {
-        // Authorized, pass through
+        // OK
       } else return new Response("Unauthorized", {status:401, headers:{'WWW-Authenticate':'Basic realm="Restricted"'}});
     } else return new Response("Unauthorized", {status:401, headers:{'WWW-Authenticate':'Basic realm="Restricted"'}});
   }
 
-  // --- ROUTE 1: UPLOADER UI ---
+  // --- ROUTE 1: UPLOADER UI (FIXED TABS) ---
   if (req.method === "GET" && url.pathname === "/") {
     return new Response(`<!DOCTYPE html><html><head><title>R2 Uploader</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>
       :root{--bg:#111;--card:#222;--text:#eee;--accent:#3b82f6;--border:#333;}
@@ -62,7 +62,8 @@ Deno.serve(async (req: Request) => {
       .box{background:var(--card);padding:2rem;border-radius:12px;width:90%;max-width:400px;box-shadow:0 10px 25px rgba(0,0,0,0.5);}
       .head{display:flex;justify-content:space-between;margin-bottom:1.5rem;} a{color:var(--accent);text-decoration:none;}
       .tabs{display:flex;border-bottom:2px solid var(--border);margin-bottom:1rem;}
-      .tab{flex:1;padding:0.8rem;background:none;border:none;color:#888;cursor:pointer;font-size:1rem;}
+      .tab{flex:1;padding:0.8rem;background:none;border:none;color:#888;cursor:pointer;font-size:1rem;transition:0.3s;}
+      .tab:hover{color:#ccc;}
       .tab.active{color:var(--accent);border-bottom:2px solid var(--accent);}
       .content{display:none;} .content.active{display:block;}
       .btn{width:100%;padding:0.8rem;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer;margin-top:1rem;font-weight:bold;}
@@ -76,46 +77,94 @@ Deno.serve(async (req: Request) => {
     </style></head><body>
     <div class="box">
       <div class="head"><h2>R2 Uploader</h2><a href="/history">History</a></div>
-      <div class="tabs"><button class="tab active" onclick="sTab('file')">File</button><button class="tab" onclick="sTab('url')">URL</button></div>
       
-      <div id="c-file" class="content active">
+      <!-- FIXED TABS -->
+      <div class="tabs">
+        <button class="tab active" id="tab-btn-file" onclick="openTab('file')">File Upload</button>
+        <button class="tab" id="tab-btn-url" onclick="openTab('url')">Remote URL</button>
+      </div>
+      
+      <!-- FILE CONTENT -->
+      <div id="view-file" class="content active">
         <form id="fForm">
           <label id="fileBox"><input type="file" id="file" hidden><span>Click to Choose File</span><div id="fName" style="color:#888;font-size:0.8em;margin-top:5px"></div></label>
           <button class="btn" id="fBtn" disabled>Upload</button>
         </form>
       </div>
       
-      <div id="c-url" class="content">
-        <form id="uForm"><input id="url" placeholder="https://..." type="url" required><input id="name" placeholder="Name (Optional)"><button class="btn" id="uBtn">Remote Upload</button></form>
+      <!-- URL CONTENT -->
+      <div id="view-url" class="content">
+        <form id="uForm">
+            <input id="urlInput" placeholder="https://example.com/video.mp4" type="url" required>
+            <input id="nameInput" placeholder="Custom Name (Optional)">
+            <button class="btn" id="uBtn">Remote Upload</button>
+        </form>
       </div>
 
       <div class="bar-box" id="progBox"><div class="bar" id="bar"></div></div>
       <div id="res" class="res"></div>
     </div>
     <script>
-      const fIn=document.getElementById('file'), fName=document.getElementById('fName'), fBtn=document.getElementById('fBtn'), res=document.getElementById('res');
-      function sTab(t){document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));event.target.classList.add('active');document.querySelectorAll('.content').forEach(x=>x.classList.remove('active'));document.getElementById('c-'+t).classList.add('active');res.innerHTML='';}
+      // TAB SWITCHING LOGIC
+      function openTab(name) {
+          // Hide all content
+          document.querySelectorAll('.content').forEach(el => el.classList.remove('active'));
+          document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+          
+          // Show selected
+          document.getElementById('view-' + name).classList.add('active');
+          document.getElementById('tab-btn-' + name).classList.add('active');
+          
+          // Reset Status
+          document.getElementById('res').innerHTML = '';
+          document.getElementById('progBox').style.display = 'none';
+      }
+
+      const fIn=document.getElementById('file'), fName=document.getElementById('fName'), fBtn=document.getElementById('fBtn');
       fIn.onchange=()=>{if(fIn.files.length){fName.innerText=fIn.files[0].name;fBtn.disabled=false;}else{fName.innerText='';fBtn.disabled=true;}};
       
-      function upload(url, body, btn){
-        btn.disabled=true; btn.innerText='Uploading...'; document.getElementById('progBox').style.display='block';
+      function upload(url, body, btn, isJson=false){
+        btn.disabled=true; btn.innerText='Uploading...'; document.getElementById('progBox').style.display='block'; document.getElementById('bar').style.width='0%';
         const xhr=new XMLHttpRequest(); xhr.open('POST', url);
+        if(isJson) xhr.setRequestHeader('Content-Type', 'application/json');
+        
         xhr.upload.onprogress=e=>{if(e.lengthComputable)document.getElementById('bar').style.width=(e.loaded/e.total)*100+'%'};
+        
         xhr.onload=()=>{
           btn.disabled=false; btn.innerText='Upload'; document.getElementById('progBox').style.display='none';
-          try{const d=JSON.parse(xhr.responseText); xhr.status===200?show(d):alert(d.error)}catch{alert('Error')}
+          try{const d=JSON.parse(xhr.responseText); xhr.status===200?show(d):alert(d.error)}catch(e){alert('Error: '+xhr.responseText)}
         };
+        
+        xhr.onerror=()=>{ btn.disabled=false; btn.innerText='Upload'; alert('Network Error'); };
         xhr.send(body);
       }
       
-      document.getElementById('fForm').onsubmit=e=>{e.preventDefault(); const fd=new FormData(); fd.append('file',fIn.files[0]); upload('/upload-file', fd, fBtn);};
-      document.getElementById('uForm').onsubmit=e=>{e.preventDefault(); upload('/upload-remote', JSON.stringify({url:document.getElementById('url').value, name:document.getElementById('name').value}), document.getElementById('uBtn'));};
+      document.getElementById('fForm').onsubmit=e=>{
+          e.preventDefault(); 
+          const fd=new FormData(); fd.append('file',fIn.files[0]); 
+          upload('/upload-file', fd, fBtn);
+      };
       
-      function show(d){res.innerHTML='<div style="color:#4ade80;margin-bottom:5px">✓ Success!</div>'+Object.values(d).map(l=>'<input readonly onclick="this.select();document.execCommand(\'copy\')" value="'+l+'">').join('');}
+      document.getElementById('uForm').onsubmit=e=>{
+          e.preventDefault(); 
+          const payload = JSON.stringify({
+              url: document.getElementById('urlInput').value, 
+              name: document.getElementById('nameInput').value
+          });
+          upload('/upload-remote', payload, document.getElementById('uBtn'), true);
+      };
+      
+      function show(d){
+          const res = document.getElementById('res');
+          res.innerHTML='<div style="color:#4ade80;margin-bottom:5px">✓ Success!</div>'+
+          '<input readonly onclick="this.select()" value="'+d.proxy+'">'+
+          '<input readonly onclick="this.select()" value="'+d.dl+'">'+
+          '<input readonly onclick="this.select()" value="'+d.r2+'">';
+      }
     </script></body></html>`, {headers:{"content-type":"text/html"}});
   }
 
-  // --- ROUTE 2: UPLOAD FILE (STREAMING - RAM SAFE) ---
+  // --- ROUTE 2: UPLOAD FILE (STREAMING) ---
   if (req.method === "POST" && url.pathname === "/upload-file") {
     try {
       const formData = await req.formData();
@@ -125,11 +174,10 @@ Deno.serve(async (req: Request) => {
       const ext = mimeToExt(file.type);
       const fileName = `${sanitize(file.name)||crypto.randomUUID()}.${ext}`;
       
-      // ★★★ STREAMING UPLOAD (RAM SAFE) ★★★
       const upload = new Upload({
         client: s3Client,
         params: { Bucket: R2_BUCKET_NAME, Key: fileName, Body: file.stream(), ContentType: file.type },
-        queueSize: 4, partSize: 10 * 1024 * 1024 // 10MB chunks
+        queueSize: 4, partSize: 10 * 1024 * 1024
       });
       await upload.done();
 
@@ -143,7 +191,7 @@ Deno.serve(async (req: Request) => {
   if (req.method === "POST" && url.pathname === "/upload-remote") {
     try {
       const {url:u, name:n} = await req.json();
-      const r = await fetch(u); if(!r.ok) throw new Error("Fetch failed");
+      const r = await fetch(u); if(!r.ok) throw new Error("Fetch failed: " + r.status);
       const ext = mimeToExt(r.headers.get("content-type")||"");
       const fileName = `${sanitize(n)||crypto.randomUUID()}.${ext}`;
       
@@ -166,13 +214,14 @@ Deno.serve(async (req: Request) => {
     const key = url.pathname.substring(dl?10:7);
     try {
       const r = await fetch(`https://${R2_PUBLIC_URL}/${key}`, {headers: req.headers.get("range")?{"range":req.headers.get("range")!}:{}});
+      if (!r.ok) return new Response("File not found", {status:404});
       const h = new Headers(r.headers); h.set("Access-Control-Allow-Origin","*");
       h.set("Content-Disposition", `${dl?'attachment':'inline'}; filename="${key}"`);
       return new Response(r.body, {status:r.status, headers:h});
     } catch { return new Response("Error",{status:500}); }
   }
 
-  // --- ROUTE 5: HISTORY PAGE (DELETE FROM LIST ONLY) ---
+  // --- ROUTE 5: HISTORY PAGE ---
   if (req.method === "GET" && url.pathname === "/history") {
     const iter = kv.list({ prefix: ["uploads"] }, { limit: 50 });
     let items = "";
@@ -196,21 +245,21 @@ Deno.serve(async (req: Request) => {
       input{background:#000;border:1px solid #333;color:#4ade80;width:100%;padding:5px;border-radius:4px;box-sizing:border-box;}
     </style><script>
       async function del(k){
-        if(!confirm("Remove from history list? (File will NOT be deleted from Cloud)"))return;
+        if(!confirm("Remove from history list? (File remains on Cloud)"))return;
         await fetch('/api/delete-history',{method:'POST',body:JSON.stringify({key:k})});
         location.reload();
       }
     </script></head><body>
-      <div class="head"><h2>History (Last 50)</h2><a href="/">Back</a></div>
+      <div class="head"><h2>History</h2><a href="/">Back</a></div>
       <div class="list">${items||'No history'}</div>
     </body></html>`, {headers:{"content-type":"text/html"}});
   }
 
-  // --- ROUTE 6: DELETE HISTORY API (KV ONLY) ---
+  // --- ROUTE 6: DELETE HISTORY API ---
   if (req.method === "POST" && url.pathname === "/api/delete-history") {
     try {
       const { key } = await req.json();
-      await kv.delete(key); // Deletes only from Database
+      await kv.delete(key);
       return Response.json({success:true});
     } catch { return Response.json({error:"Failed"},{status:500}); }
   }
