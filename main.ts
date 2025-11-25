@@ -195,7 +195,7 @@ Deno.serve(async (req: Request) => {
                 ContentDisposition: `attachment; filename="${fileName}"`,
                 CacheControl: "public, max-age=31536000, immutable"
             },
-            queueSize: 8, partSize: 50 * 1024 * 1024 // Increased to 50MB
+            queueSize: 4, partSize: 30 * 1024 * 1024 // Increased to 50MB
           });
           upload.on("httpUploadProgress", p => { if(total) push({progress:Math.round((p.loaded!/total)*100)}) });
           await upload.done();
