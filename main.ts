@@ -224,7 +224,7 @@ Deno.serve(async (req: Request) => {
             ResponseCacheControl: "public, max-age=31536000"
         });
         
-        const signedUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
+        const signedUrl = await getSignedUrl(s3Client, command, { expiresIn: 10800 });
         return Response.redirect(signedUrl, 302);
     } catch (e) {
         return new Response("Link expired or file not found", { status: 404 });
