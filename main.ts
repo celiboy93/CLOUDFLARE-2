@@ -218,11 +218,11 @@ Deno.serve(async (req: Request) => {
           const res = document.getElementById('res');
           res.innerHTML = \`
             <div style="color:#4ade80;margin-bottom:10px;text-align:center">✓ Upload Successful!</div>
-            <div class="link-row"><div class="link-label">Proxy Play (Deno Bandwidth)</div>
+            <div class="link-row"><div class="link-label">Proxy Play (Video Watch)</div>
                 <div class="link-group"><input readonly value="\${d.proxy}" onclick="this.select()"><button class="copy-btn" onclick="copyTxt(this, '\${d.proxy}')">Copy</button></div></div>
-            <div class="link-row"><div class="link-label">Proxy Download (Deno Bandwidth)</div>
+            <div class="link-row"><div class="link-label">Proxy Download (Forced DL)</div>
                 <div class="link-group"><input readonly value="\${d.dl}" onclick="this.select()"><button class="copy-btn" onclick="copyTxt(this, '\${d.dl}')">Copy</button></div></div>
-            <div class="link-row"><div class="link-label">R2 Direct (Saves Bandwidth)</div>
+            <div class="link-row"><div class="link-label">R2 Direct (Fastest)</div>
                 <div class="link-group"><input readonly value="\${d.r2}" onclick="this.select()"><button class="copy-btn" onclick="copyTxt(this, '\${d.r2}')">Copy</button></div></div>
           \`;
       }
@@ -297,17 +297,42 @@ Deno.serve(async (req: Request) => {
     return new Response(body, { headers: { "Content-Type": "application/x-ndjson" } });
   }
 
-  // --- ROUTE 4: PROXY & DOWNLOAD ---
+  // --- ROUTE 4: PROXY & DOWNLOAD (Optimized for Speed & Forced Download) ---
   if (req.method === "GET" && (url.pathname.startsWith("/image/") || url.pathname.startsWith("/download/"))) {
-    const dl = url.pathname.startsWith("/download/");
-    const key = url.pathname.substring(dl?10:7);
+    const isDownloadLink = url.pathname.startsWith("/download/");
+    const key = url.pathname.substring(isDownloadLink ? 10 : 7); // Remove path prefix to get filename
+
     try {
-      const r = await fetch(`https://${R2_PUBLIC_URL}/${key}`, {headers: req.headers.get("range")?{"range":req.headers.get("range")!}:{}});
-      if (!r.ok) return new Response("File not found", {status:404});
-      const h = new Headers(r.headers); h.set("Access-Control-Allow-Origin","*");
-      h.set("Content-Disposition", `${dl?'attachment':'inline'}; filename="${key}"`);
-      return new Response(r.body, {status:r.status, headers:h});
-    } catch { return new Response("Error",{status:500}); }
+      // Request to R2 with Range support (Important for video seeking/speed)
+      const r2Response = await fetch(`https://${R2_PUBLIC_URL}/${key}`, {
+        headers: req.headers.get("range") ? { "range": req.headers.get("range")! } : {}
+      });
+
+      if (!r2Response.ok) return new Response("File not found on Cloud", { status: 404 });
+
+      // Prepare headers for Client
+      const responseHeaders = new Headers(r2Response.headers);
+      responseHeaders.set("Access-Control-Allow-Origin", "*");
+      
+      // OPTIMIZATION: Cache Control (Video loads faster on repeat views)
+      responseHeaders.set("Cache-Control", "public, max-age=86400, immutable"); 
+
+      if (isDownloadLink) {
+        // FORCE DOWNLOAD LOGIC:
+        // 1. attachment tells browser to save.
+        // 2. application/octet-stream tells browser "I don't know what this is, just save it" (prevents video player).
+        responseHeaders.set("Content-Disposition", `attachment; filename="${key}"`);
+        responseHeaders.set("Content-Type", "application/octet-stream");
+      } else {
+        // STREAMING LOGIC:
+        // inline allows the browser to render/play it.
+        responseHeaders.set("Content-Disposition", `inline; filename="${key}"`);
+      }
+
+      return new Response(r2Response.body, { status: r2Response.status, headers: responseHeaders });
+    } catch { 
+      return new Response("Proxy Error", { status: 500 }); 
+    }
   }
 
   // --- ROUTE 5: HISTORY PAGE ---
