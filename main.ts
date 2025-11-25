@@ -160,7 +160,7 @@ Deno.serve(async (req: Request) => {
             ContentDisposition: `attachment; filename="${fileName}"`,
             CacheControl: "public, max-age=31536000, immutable"
         },
-        queueSize: 8, partSize: 30 * 1024 * 1024 // Increased to 50MB for faster large file uploads
+        queueSize: 8, partSize: 20 * 1024 * 1024 // Increased to 20MB for faster large file uploads
       });
       await upload.done();
 
