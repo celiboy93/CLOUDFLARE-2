@@ -1,5 +1,6 @@
-import { S3Client } from "npm:@aws-sdk/client-s3";
+import { S3Client, GetObjectCommand } from "npm:@aws-sdk/client-s3";
 import { Upload } from "npm:@aws-sdk/lib-storage";
+import { getSignedUrl } from "npm:@aws-sdk/s3-request-presigner"; 
 import { timingSafeEqual } from "jsr:@std/crypto/timing-safe-equal";
 
 // --- 1. CONFIGURATION ---
@@ -57,205 +58,82 @@ Deno.serve(async (req: Request) => {
   // --- ROUTE 1: UPLOADER UI ---
   if (req.method === "GET" && url.pathname === "/") {
     return new Response(`<!DOCTYPE html><html><head><title>R2 Uploader</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>
-      :root{--bg:#0f172a;--card:#1e293b;--text:#f1f5f9;--accent:#3b82f6;--accent-glow:#60a5fa;--border:#334155;}
+      :root{--bg:#0f172a;--card:#1e293b;--text:#f1f5f9;--accent:#3b82f6;--border:#334155;}
       body{font-family:'Segoe UI', sans-serif;background:var(--bg);color:var(--text);margin:0;display:grid;place-items:center;min-height:100vh;}
       .box{background:var(--card);padding:2.5rem;border-radius:16px;width:90%;max-width:420px;box-shadow:0 20px 40px -10px rgba(0,0,0,0.5);border:1px solid var(--border);}
       .head{display:flex;justify-content:space-between;align-items:center;margin-bottom:2rem;} 
-      h2{margin:0;font-weight:600;letter-spacing:-0.5px;}
-      a{color:var(--accent);text-decoration:none;font-size:0.9rem;font-weight:500;transition:0.2s;} a:hover{color:var(--accent-glow);}
-      
+      h2{margin:0;font-weight:600;} a{color:var(--accent);text-decoration:none;}
       .tabs{display:flex;background:#0f172a;padding:4px;border-radius:10px;margin-bottom:1.5rem;}
       .tab{flex:1;padding:0.6rem;background:none;border:none;color:#94a3b8;cursor:pointer;font-size:0.9rem;border-radius:8px;transition:0.3s;font-weight:500;}
-      .tab:hover{color:#fff;}
-      .tab.active{background:var(--accent);color:#fff;box-shadow:0 4px 12px rgba(59,130,246,0.4);}
-      
-      .content{display:none;animation:fade 0.3s ease;} .content.active{display:block;}
-      @keyframes fade{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
-      
-      .btn{width:100%;padding:1rem;background:linear-gradient(135deg, var(--accent), var(--accent-glow));color:#fff;border:none;border-radius:10px;cursor:pointer;margin-top:1.5rem;font-weight:600;font-size:1rem;transition:0.2s;box-shadow:0 4px 15px rgba(59,130,246,0.3);}
-      .btn:disabled{background:#334155;color:#94a3b8;cursor:not-allowed;box-shadow:none;}
-      .btn:active{transform:scale(0.98);}
-      
-      input{width:100%;padding:1rem;background:#0f172a;border:1px solid var(--border);color:#fff;border-radius:10px;box-sizing:border-box;margin-bottom:0.8rem;transition:0.2s;outline:none;}
-      input:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(59,130,246,0.2);}
-      
-      #fileBox{border:2px dashed var(--border);padding:2.5rem;text-align:center;border-radius:12px;cursor:pointer;transition:0.2s;display:block;}
+      .tab.active{background:var(--accent);color:#fff;} .content{display:none;} .content.active{display:block;}
+      .btn{width:100%;padding:1rem;background:var(--accent);color:#fff;border:none;border-radius:10px;cursor:pointer;margin-top:1.5rem;font-weight:600;}
+      .btn:disabled{background:#334155;color:#94a3b8;cursor:not-allowed;}
+      input{width:100%;padding:1rem;background:#0f172a;border:1px solid var(--border);color:#fff;border-radius:10px;box-sizing:border-box;margin-bottom:0.8rem;outline:none;}
+      #fileBox{border:2px dashed var(--border);padding:2.5rem;text-align:center;border-radius:12px;cursor:pointer;}
       #fileBox:hover{background:#0f172a;border-color:var(--accent);}
-      
-      /* Progress Bar Styling */
       .progress-container {margin-top:20px; display:none;}
-      .progress-header {display:flex; justify-content:space-between; font-size:0.85rem; color:#94a3b8; margin-bottom:8px;}
       .progress-track {height:8px; background:#0f172a; border-radius:4px; overflow:hidden;}
-      .progress-fill {
-          height:100%; width:0%; border-radius:4px;
-          background: linear-gradient(90deg, var(--accent), #a855f7);
-          background-size: 200% 100%;
-          animation: shimmer 2s infinite linear;
-          transition: width 0.3s ease-out;
-          box-shadow: 0 0 10px rgba(59,130,246,0.5);
-      }
-      @keyframes shimmer { 0%{background-position: 100% 0} 100%{background-position: -100% 0} }
-      
-      .res{margin-top:1.5rem;}
-      .link-row {margin-bottom:12px;}
-      .link-label {font-size:0.75rem; color:#94a3b8; margin-bottom:4px; font-weight:500;}
-      .link-group {display:flex; position:relative;}
-      .link-group input {margin-bottom:0; border-radius:8px; padding-right:60px; font-family:monospace; color:#60a5fa; font-size:0.85rem;}
-      .copy-btn {position:absolute; right:4px; top:4px; bottom:4px; background:var(--card); color:var(--accent); border:none; padding:0 12px; border-radius:6px; cursor:pointer; font-weight:600; font-size:0.8rem; border:1px solid var(--border);}
-      .copy-btn:hover {background:var(--accent); color:#fff; border-color:var(--accent);}
+      .progress-fill {height:100%; width:0%; background: linear-gradient(90deg, var(--accent), #a855f7); transition: width 0.3s ease-out;}
+      #progPct {text-align:right; font-size:0.8rem; color:#94a3b8; display:block; margin-bottom:5px;}
+      .link-group {display:flex; margin-top:10px;}
+      .link-group input {margin-bottom:0; border-radius:8px 0 0 8px; font-family:monospace; color:#60a5fa;}
+      .copy-btn {background:var(--border); color:white; border:none; padding:0 15px; border-radius:0 8px 8px 0; cursor:pointer;}
     </style></head><body>
     <div class="box">
-      <div class="head"><h2>R2 Uploader</h2><a href="/history">History →</a></div>
-      
+      <div class="head"><h2>R2 Uploader</h2><a href="/history">History</a></div>
       <div class="tabs">
-        <button class="tab active" id="tab-btn-file" onclick="openTab('file')">File Upload</button>
-        <button class="tab" id="tab-btn-url" onclick="openTab('url')">Remote URL</button>
+        <button class="tab active" id="tab-btn-file" onclick="openTab('file')">File</button>
+        <button class="tab" id="tab-btn-url" onclick="openTab('url')">URL</button>
       </div>
-      
       <div id="view-file" class="content active">
         <form id="fForm">
-          <label id="fileBox"><input type="file" id="file" hidden><span style="font-size:1.2rem">📁</span><br><span style="color:#94a3b8;font-size:0.9rem">Click to select file</span><div id="fName" style="color:var(--accent);font-weight:bold;font-size:0.9rem;margin-top:10px"></div></label>
-          <button class="btn" id="fBtn" disabled>Upload File</button>
+          <label id="fileBox"><input type="file" id="file" hidden><span>Choose File</span><div id="fName" style="color:var(--accent);margin-top:10px"></div></label>
+          <button class="btn" id="fBtn" disabled>Upload</button>
         </form>
       </div>
-      
       <div id="view-url" class="content">
-        <form id="uForm">
-            <input id="urlInput" placeholder="https://example.com/video.mp4" type="url" required>
-            <input id="nameInput" placeholder="Custom Filename (Optional)">
-            <button class="btn" id="uBtn">Start Remote Upload</button>
-        </form>
+        <form id="uForm"><input id="urlInput" placeholder="Video URL" type="url" required><input id="nameInput" placeholder="Filename"><button class="btn" id="uBtn">Remote Upload</button></form>
       </div>
-
-      <div class="progress-container" id="progBox">
-          <div class="progress-header"><span id="progStatus">Uploading...</span><span id="progPct">0%</span></div>
-          <div class="progress-track"><div class="progress-fill" id="bar"></div></div>
-      </div>
-      
-      <div id="res" class="res"></div>
+      <div class="progress-container" id="progBox"><span id="progPct">0%</span><div class="progress-track"><div class="progress-fill" id="bar"></div></div></div>
+      <div id="res" style="margin-top:20px"></div>
     </div>
     <script>
-      function openTab(name) {
-          document.querySelectorAll('.content').forEach(el => el.classList.remove('active'));
-          document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
-          document.getElementById('view-' + name).classList.add('active');
-          document.getElementById('tab-btn-' + name).classList.add('active');
-          document.getElementById('res').innerHTML = '';
-          resetProg();
-      }
-
+      function openTab(n){document.querySelectorAll('.content').forEach(e=>e.classList.remove('active'));document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));document.getElementById('view-'+n).classList.add('active');document.getElementById('tab-btn-'+n).classList.add('active');}
       const fIn=document.getElementById('file'), fName=document.getElementById('fName'), fBtn=document.getElementById('fBtn');
-      fIn.onchange=()=>{if(fIn.files.length){fName.innerText=fIn.files[0].name;fBtn.disabled=false;document.getElementById('fileBox').style.borderColor='var(--accent)';}else{fName.innerText='';fBtn.disabled=true;document.getElementById('fileBox').style.borderColor='var(--border)';}};
+      fIn.onchange=()=>{if(fIn.files.length){fName.innerText=fIn.files[0].name;fBtn.disabled=false;}else{fName.innerText='';fBtn.disabled=true;}};
+      function updateProg(p){document.getElementById('progBox').style.display='block';document.getElementById('bar').style.width=p+'%';document.getElementById('progPct').innerText=p+'%';}
       
-      function resetProg(){
-          document.getElementById('progBox').style.display='none';
-          document.getElementById('bar').style.width='0%';
-          document.getElementById('progPct').innerText='0%';
-      }
-
-      function updateProg(pct, msg) {
-          document.getElementById('progBox').style.display='block';
-          document.getElementById('bar').style.width = pct + '%';
-          document.getElementById('progPct').innerText = pct + '%';
-          if(msg) document.getElementById('progStatus').innerText = msg;
-      }
-
-      // 1. File Upload
-      document.getElementById('fForm').onsubmit=e=>{
-          e.preventDefault(); 
-          const fd=new FormData(); fd.append('file',fIn.files[0]); 
-          const btn = fBtn; btn.disabled=true; btn.innerText='Uploading...';
-          
-          const xhr=new XMLHttpRequest(); 
-          xhr.open('POST', '/upload-file');
-          xhr.upload.onprogress=e=>{if(e.lengthComputable) updateProg(Math.round((e.loaded/e.total)*100), 'Uploading File...');};
+      const handleUpload = (url, body) => {
+          const xhr=new XMLHttpRequest(); xhr.open('POST', url);
+          xhr.upload.onprogress=e=>{if(e.lengthComputable) updateProg(Math.round((e.loaded/e.total)*100))};
           xhr.onload=()=>{
-              btn.disabled=false; btn.innerText='Upload File'; resetProg();
-              try{const d=JSON.parse(xhr.responseText); xhr.status===200?show(d):alert(d.error)}catch(e){alert('Error: '+xhr.responseText)}
+             document.getElementById('progBox').style.display='none'; fBtn.disabled=false; document.getElementById('uBtn').disabled=false;
+             try{const d=JSON.parse(xhr.responseText); show(d)}catch{alert('Error')}
           };
-          xhr.onerror=()=>{ btn.disabled=false; btn.innerText='Upload File'; alert('Network Error'); };
-          xhr.send(fd);
+          xhr.send(body);
       };
-      
-      // 2. Remote Upload
-      document.getElementById('uForm').onsubmit=async e=>{
-          e.preventDefault(); 
-          const btn = document.getElementById('uBtn');
-          const url = document.getElementById('urlInput').value;
-          const name = document.getElementById('nameInput').value;
-          
-          btn.disabled=true; btn.innerText='Processing...'; 
-          updateProg(0, 'Connecting...');
 
-          try {
-              const response = await fetch('/upload-remote', {
-                  method: 'POST',
-                  headers: {'Content-Type': 'application/json'},
-                  body: JSON.stringify({url, name})
+      document.getElementById('fForm').onsubmit=e=>{e.preventDefault(); fBtn.disabled=true; const fd=new FormData(); fd.append('file',fIn.files[0]); handleUpload('/upload-file', fd);};
+      
+      document.getElementById('uForm').onsubmit=e=>{
+          e.preventDefault(); document.getElementById('uBtn').disabled=true; updateProg(0);
+          fetch('/upload-remote',{method:'POST',body:JSON.stringify({url:document.getElementById('urlInput').value, name:document.getElementById('nameInput').value})})
+          .then(r=>{
+              const reader=r.body.getReader(); let dec=new TextDecoder(), buf='';
+              return reader.read().then(function process({done,value}){
+                  if(done) return; buf+=dec.decode(value,{stream:true}); let lines=buf.split('\\n'); buf=lines.pop();
+                  lines.forEach(l=>{if(l){const m=JSON.parse(l); if(m.progress)updateProg(m.progress); if(m.done)show(m.done);}});
+                  return reader.read().then(process);
               });
-
-              if (!response.ok && response.headers.get('content-type') === 'application/json') {
-                  const err = await response.json(); throw new Error(err.error);
-              }
-
-              const reader = response.body.getReader();
-              const decoder = new TextDecoder();
-              let buffer = '';
-
-              while (true) {
-                  const { done, value } = await reader.read();
-                  if (done) break;
-                  
-                  buffer += decoder.decode(value, { stream: true });
-                  const lines = buffer.split('\\n');
-                  buffer = lines.pop();
-
-                  for (const line of lines) {
-                      if (!line.trim()) continue;
-                      try {
-                          const msg = JSON.parse(line);
-                          if (msg.progress) {
-                              updateProg(msg.progress, 'Transferring to Cloud...');
-                          } else if (msg.done) {
-                              show(msg.done);
-                          } else if (msg.error) {
-                              throw new Error(msg.error);
-                          }
-                      } catch (e) { console.log('Parse error', e); }
-                  }
-              }
-          } catch (e) {
-              alert("Error: " + e.message);
-          } finally {
-              btn.disabled=false; btn.innerText='Start Remote Upload'; resetProg();
-          }
+          }).catch(e=>alert(e));
       };
-      
-      function copyTxt(btn, txt) {
-          navigator.clipboard.writeText(txt).then(() => {
-              const original = btn.innerText; btn.innerText = '✓';
-              btn.style.background = '#22c55e'; btn.style.color='white';
-              setTimeout(() => { 
-                  btn.innerText = 'Copy'; 
-                  btn.style.background = 'var(--card)';
-                  btn.style.color = 'var(--accent)';
-              }, 2000);
-          });
-      }
 
-      function show(d){
-          const res = document.getElementById('res');
-          res.innerHTML = \`
-            <div style="background:rgba(74,222,128,0.1);border:1px solid #22c55e;color:#4ade80;padding:10px;border-radius:8px;margin-bottom:15px;text-align:center;font-weight:500;">✓ Upload Successful!</div>
-            <div class="link-row"><div class="link-label">R2 Direct Link (Auto Download)</div>
-                <div class="link-group"><input readonly value="\${d.r2}" onclick="this.select()"><button class="copy-btn" onclick="copyTxt(this, '\${d.r2}')">Copy</button></div></div>
-            <div style="font-size:0.75rem; color:#64748b; margin-top:8px; line-height:1.4;">* This link is optimized for high-speed streaming and will force download when clicked. Perfect for your Movie App.</div>
-          \`;
-      }
+      function copyTxt(btn,t){navigator.clipboard.writeText(t).then(()=>{btn.innerText='✓';setTimeout(()=>btn.innerText='Copy',1000)})}
+      function show(d){document.getElementById('res').innerHTML=\`<div class="link-group"><input readonly value="\${d.appLink}"><button class="copy-btn" onclick="copyTxt(this,'\${d.appLink}')">Copy</button></div><div style="color:#64748b;font-size:0.8rem;margin-top:5px">* App Link (Redirects to R2 - Bandwidth Saver)</div>\`;}
     </script></body></html>`, {headers:{"content-type":"text/html"}});
   }
 
-  // --- ROUTE 2: UPLOAD FILE (High Speed & Parallel) ---
+  // --- ROUTE 2: UPLOAD FILE ---
   if (req.method === "POST" && url.pathname === "/upload-file") {
     try {
       const formData = await req.formData();
@@ -263,8 +141,7 @@ Deno.serve(async (req: Request) => {
       if (!file) return Response.json({error:"No file"},{status:400});
       
       const ext = mimeToExt(file.type);
-      const safeName = sanitize(file.name) || crypto.randomUUID();
-      const fileName = `${safeName}.${ext}`;
+      const fileName = `${sanitize(file.name)||crypto.randomUUID()}.${ext}`;
       
       const upload = new Upload({
         client: s3Client,
@@ -273,37 +150,33 @@ Deno.serve(async (req: Request) => {
             Key: fileName, 
             Body: file.stream(), 
             ContentType: file.type,
-            // Forced Download & High Cache
-            ContentDisposition: `attachment; filename="${fileName}"`, 
+            ContentDisposition: `attachment; filename="${fileName}"`, // Ensure download
             CacheControl: "public, max-age=31536000, immutable"
         },
-        // OPTIMIZATION: Higher parallelism for speed
-        queueSize: 8, partSize: 20 * 1024 * 1024 
+        queueSize: 8, partSize: 20 * 1024 * 1024
       });
       await upload.done();
 
-      const data = { id: crypto.randomUUID(), fileName, proxyUrl: `https://${url.host}/image/${fileName}`, r2Url: `https://${R2_PUBLIC_URL}/${fileName}`, downloadUrl: `https://${url.host}/download/${fileName}`, createdAt: new Date(), source: "File" };
+      // Generate the Permanent App Link (Redirector)
+      const appLink = `https://${url.host}/download/${fileName}`;
+      const data = { id: crypto.randomUUID(), fileName, appLink, createdAt: new Date(), source: "File" };
       await kv.set(["uploads", MAX_DATE_MS - Date.now(), data.id], data);
-      return Response.json({proxy:data.proxyUrl, r2:data.r2Url, dl:data.downloadUrl});
+      return Response.json({appLink});
     } catch (e) { return Response.json({error:e.message},{status:500}); }
   }
 
-  // --- ROUTE 3: REMOTE UPLOAD (High Speed & Parallel) ---
+  // --- ROUTE 3: REMOTE UPLOAD ---
   if (req.method === "POST" && url.pathname === "/upload-remote") {
     const body = new ReadableStream({
       async start(controller) {
         const enc = new TextEncoder();
-        const push = (data: any) => controller.enqueue(enc.encode(JSON.stringify(data) + "\n"));
-        
+        const push = (d: any) => controller.enqueue(enc.encode(JSON.stringify(d) + "\n"));
         try {
           const {url:u, name:n} = await req.json();
           const r = await fetch(u);
-          if(!r.ok) throw new Error("Fetch failed: " + r.status);
-          
-          const totalSize = parseInt(r.headers.get("content-length") || "0");
-          const ext = mimeToExt(r.headers.get("content-type")||"");
-          const safeName = sanitize(n) || crypto.randomUUID();
-          const fileName = `${safeName}.${ext}`;
+          if(!r.ok) throw new Error("Fetch error");
+          const total = parseInt(r.headers.get("content-length")||"0");
+          const fileName = `${sanitize(n)||crypto.randomUUID()}.${mimeToExt(r.headers.get("content-type")||"")}`;
           
           const upload = new Upload({
             client: s3Client,
@@ -312,116 +185,64 @@ Deno.serve(async (req: Request) => {
                 Key: fileName, 
                 Body: r.body as any, 
                 ContentType: r.headers.get("content-type")||"application/octet-stream",
-                // Forced Download & High Cache
-                ContentDisposition: `attachment; filename="${fileName}"`, 
+                ContentDisposition: `attachment; filename="${fileName}"`,
                 CacheControl: "public, max-age=31536000, immutable"
             },
-            // OPTIMIZATION: Higher parallelism for speed
-            queueSize: 8, partSize: 20 * 1024 * 1024 
+            queueSize: 8, partSize: 20 * 1024 * 1024
           });
-
-          upload.on("httpUploadProgress", (progress) => {
-            if (totalSize > 0 && progress.loaded) {
-              const pct = Math.round((progress.loaded / totalSize) * 100);
-              push({ progress: pct });
-            }
-          });
-
+          upload.on("httpUploadProgress", p => { if(total) push({progress:Math.round((p.loaded!/total)*100)}) });
           await upload.done();
 
-          const data = { id: crypto.randomUUID(), fileName, proxyUrl: `https://${url.host}/image/${fileName}`, r2Url: `https://${R2_PUBLIC_URL}/${fileName}`, downloadUrl: `https://${url.host}/download/${fileName}`, createdAt: new Date(), source: "URL" };
+          // Generate the Permanent App Link (Redirector)
+          const appLink = `https://${url.host}/download/${fileName}`;
+          const data = { id: crypto.randomUUID(), fileName, appLink, createdAt: new Date(), source: "URL" };
           await kv.set(["uploads", MAX_DATE_MS - Date.now(), data.id], data);
-          
-          push({ done: {proxy:data.proxyUrl, r2:data.r2Url, dl:data.downloadUrl} });
-        } catch (e) {
-          push({ error: e.message });
-        }
+          push({done:{appLink}});
+        } catch (e) { push({error:e.message}); }
         controller.close();
       }
     });
     return new Response(body, { headers: { "Content-Type": "application/x-ndjson" } });
   }
 
-  // --- ROUTE 4: PROXY & DOWNLOAD ---
-  if (req.method === "GET" && (url.pathname.startsWith("/image/") || url.pathname.startsWith("/download/"))) {
-    const isDownloadLink = url.pathname.startsWith("/download/");
-    const key = url.pathname.substring(isDownloadLink ? 10 : 7);
-
+  // --- ROUTE 4: PROXY/REDIRECT (BANDWIDTH SAVER) ---
+  // This creates a permanent link that redirects to a signed, bandwidth-saving R2 link
+  if (req.method === "GET" && url.pathname.startsWith("/download/")) {
+    const key = url.pathname.substring(10); // Remove "/download/"
+    
     try {
-      const r2Response = await fetch(`https://${R2_PUBLIC_URL}/${key}`, {
-        headers: req.headers.get("range") ? { "range": req.headers.get("range")! } : {}
-      });
-
-      if (!r2Response.ok) return new Response("File not found on Cloud", { status: 404 });
-
-      const responseHeaders = new Headers(r2Response.headers);
-      responseHeaders.set("Access-Control-Allow-Origin", "*");
-      responseHeaders.set("Cache-Control", "public, max-age=31536000, immutable"); 
-
-      if (isDownloadLink) {
-        responseHeaders.set("Content-Disposition", `attachment; filename="${key}"`);
-        responseHeaders.set("Content-Type", "application/octet-stream");
-      } else {
-        responseHeaders.set("Content-Disposition", `inline; filename="${key}"`);
-      }
-
-      return new Response(r2Response.body, { status: r2Response.status, headers: responseHeaders });
-    } catch { 
-      return new Response("Proxy Error", { status: 500 }); 
+        // Generate a signed URL that is valid for 1 hour
+        const command = new GetObjectCommand({
+            Bucket: R2_BUCKET_NAME,
+            Key: key,
+            ResponseContentDisposition: `attachment; filename="${key}"`, // Force download
+            ResponseCacheControl: "public, max-age=31536000" // Speed
+        });
+        
+        const signedUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
+        
+        // 🔥 CRITICAL: 302 Redirect means user downloads from R2, not Deno
+        return Response.redirect(signedUrl, 302);
+    } catch (e) {
+        return new Response("Link expired or file not found", { status: 404 });
     }
   }
 
-  // --- ROUTE 5: HISTORY PAGE ---
+  // --- ROUTE 5: HISTORY ---
   if (req.method === "GET" && url.pathname === "/history") {
     const iter = kv.list({ prefix: ["uploads"] }, { limit: 50 });
     let items = "";
     for await (const e of iter) {
       const v = e.value as any;
-      const key = JSON.stringify(e.key);
-      items += `
-        <div class="item">
-          <div class="top"><b>${v.fileName}</b><button onclick='del(${key})'>Remove List</button></div>
-          <div class="meta">${formatTimeAgo(new Date(v.createdAt))} • ${v.source}</div>
-          <div class="link-group"><input readonly value="${v.r2Url}" onclick="this.select()"><button class="copy-btn" onclick="copyTxt(this, '${v.r2Url}')">Copy</button></div>
-        </div>`;
+      const k = JSON.stringify(e.key);
+      items += `<div class="item"><div class="top"><b>${v.fileName}</b><button onclick='del(${k})'>Del</button></div><div class="meta">${formatTimeAgo(new Date(v.createdAt))}</div><div class="link-group"><input readonly value="${v.appLink}"><button class="copy-btn" onclick="copyTxt(this,'${v.appLink}')">Copy</button></div></div>`;
     }
-    return new Response(`<!DOCTYPE html><html><head><title>History</title><meta name="viewport" content="width=device-width,initial-scale=1"><style>
-      body{background:#0f172a;color:#f1f5f9;font-family:sans-serif;padding:1rem;max-width:600px;margin:0 auto;}
-      .head{display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem;border-bottom:1px solid #334155;padding-bottom:15px;} 
-      a{color:#3b82f6;text-decoration:none;}
-      .item{background:#1e293b;padding:1.2rem;border-radius:12px;margin-bottom:15px;border:1px solid #334155;box-shadow:0 4px 6px -1px rgba(0,0,0,0.1);}
-      .top{display:flex;justify-content:space-between;align-items:center;}
-      button{background:#ef4444;color:#fff;border:none;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:0.8rem;font-weight:500;}
-      .meta{font-size:0.8rem;color:#94a3b8;margin:8px 0;}
-      .link-group{display:flex;margin-top:8px;position:relative;}
-      input{background:#0f172a;border:1px solid #334155;color:#60a5fa;flex:1;padding:8px;border-radius:8px;font-family:monospace;padding-right:60px;}
-      .copy-btn{background:#1e293b;color:#3b82f6;border:1px solid #334155;position:absolute;right:4px;top:4px;bottom:4px;padding:0 12px;border-radius:6px;}
-      .copy-btn:hover{background:#3b82f6;color:white;}
-    </style><script>
-      async function del(k){
-        if(!confirm("Remove from history list? (File remains on Cloud)"))return;
-        await fetch('/api/delete-history',{method:'POST',body:JSON.stringify({key:k})});
-        location.reload();
-      }
-      function copyTxt(btn, txt) {
-          navigator.clipboard.writeText(txt).then(() => {
-              const original = btn.innerText; btn.innerText = '✓'; btn.style.color='#22c55e';
-              setTimeout(() => {btn.innerText = original; btn.style.color='#3b82f6'}, 2000);
-          });
-      }
-    </script></head><body>
-      <div class="head"><h2>History</h2><a href="/">← Back to Upload</a></div>
-      <div class="list">${items||'<div style="text-align:center;color:#64748b;margin-top:50px">No history found</div>'}</div>
-    </body></html>`, {headers:{"content-type":"text/html"}});
+    return new Response(`<!DOCTYPE html><html><head><title>History</title><meta name="viewport" content="width=device-width"><style>body{background:#0f172a;color:#fff;font-family:sans-serif;padding:1rem;max-width:600px;margin:0 auto}.item{background:#1e293b;padding:1rem;margin-bottom:10px;border-radius:8px}.link-group{display:flex;margin-top:5px}input{background:#0f172a;border:none;color:#60a5fa;flex:1;padding:5px}button{background:#334155;color:#fff;border:none;padding:5px 10px;cursor:pointer}</style><script>async function del(k){if(confirm('Delete?'))await fetch('/api/delete-history',{method:'POST',body:JSON.stringify({key:k})});location.reload()} function copyTxt(b,t){navigator.clipboard.writeText(t);b.innerText='✓'}</script></head><body><h2>History</h2><a href="/" style="color:#60a5fa">Back</a><br><br>${items}</body></html>`,{headers:{"content-type":"text/html"}});
   }
 
-  // --- ROUTE 6: DELETE HISTORY API ---
+  // --- ROUTE 6: DELETE API ---
   if (req.method === "POST" && url.pathname === "/api/delete-history") {
-    try {
-      const { key } = await req.json();
-      await kv.delete(key);
-      return Response.json({success:true});
-    } catch { return Response.json({error:"Failed"},{status:500}); }
+      const {key} = await req.json(); await kv.delete(key); return Response.json({ok:true});
   }
 
   return new Response("404", { status: 404 });
