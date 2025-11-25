@@ -43,16 +43,22 @@ function sanitize(n: string|null): string|null {
 Deno.serve(async (req: Request) => {
   const url = new URL(req.url);
 
-  // Auth Check
-  if (BASIC_AUTH_USER && BASIC_AUTH_PASS) {
-    const auth = req.headers.get("Authorization");
-    if (auth) {
-      const [u, p] = new TextDecoder().decode(Uint8Array.from(atob(auth.split(" ")[1]), c=>c.charCodeAt(0))).split(":");
-      const enc = new TextEncoder();
-      if (timingSafeEqual(enc.encode(u), enc.encode(BASIC_AUTH_USER)) && timingSafeEqual(enc.encode(p), enc.encode(BASIC_AUTH_PASS))) {
-        // OK
-      } else return new Response("Unauthorized", {status:401, headers:{'WWW-Authenticate':'Basic realm="Restricted"'}});
-    } else return new Response("Unauthorized", {status:401, headers:{'WWW-Authenticate':'Basic realm="Restricted"'}});
+  // 🔥 FIX 1: AUTHENTICATION CHECK 🔥
+  // Only verify password if NOT accessing a download link
+  if (!url.pathname.startsWith("/download/")) {
+      if (BASIC_AUTH_USER && BASIC_AUTH_PASS) {
+        const auth = req.headers.get("Authorization");
+        if (auth) {
+          const [u, p] = new TextDecoder().decode(Uint8Array.from(atob(auth.split(" ")[1]), c=>c.charCodeAt(0))).split(":");
+          const enc = new TextEncoder();
+          // Verify credentials
+          if (!(timingSafeEqual(enc.encode(u), enc.encode(BASIC_AUTH_USER)) && timingSafeEqual(enc.encode(p), enc.encode(BASIC_AUTH_PASS)))) {
+             return new Response("Unauthorized", {status:401, headers:{'WWW-Authenticate':'Basic realm="Restricted"'}});
+          }
+        } else {
+             return new Response("Unauthorized", {status:401, headers:{'WWW-Authenticate':'Basic realm="Restricted"'}});
+        }
+      }
   }
 
   // --- ROUTE 1: UPLOADER UI ---
@@ -129,7 +135,7 @@ Deno.serve(async (req: Request) => {
       };
 
       function copyTxt(btn,t){navigator.clipboard.writeText(t).then(()=>{btn.innerText='✓';setTimeout(()=>btn.innerText='Copy',1000)})}
-      function show(d){document.getElementById('res').innerHTML=\`<div class="link-group"><input readonly value="\${d.appLink}"><button class="copy-btn" onclick="copyTxt(this,'\${d.appLink}')">Copy</button></div><div style="color:#64748b;font-size:0.8rem;margin-top:5px">* App Link (Redirects to R2 - Bandwidth Saver)</div>\`;}
+      function show(d){document.getElementById('res').innerHTML=\`<div class="link-group"><input readonly value="\${d.appLink}"><button class="copy-btn" onclick="copyTxt(this,'\${d.appLink}')">Copy</button></div><div style="color:#64748b;font-size:0.8rem;margin-top:5px">* Direct R2 Redirect (No Password Required)</div>\`;}
     </script></body></html>`, {headers:{"content-type":"text/html"}});
   }
 
@@ -150,14 +156,14 @@ Deno.serve(async (req: Request) => {
             Key: fileName, 
             Body: file.stream(), 
             ContentType: file.type,
-            ContentDisposition: `attachment; filename="${fileName}"`, // Ensure download
+            // 🔥 FIX 2: OPTIMIZED SPEED 🔥
+            ContentDisposition: `attachment; filename="${fileName}"`,
             CacheControl: "public, max-age=31536000, immutable"
         },
-        queueSize: 8, partSize: 20 * 1024 * 1024
+        queueSize: 8, partSize: 50 * 1024 * 1024 // Increased to 50MB for faster large file uploads
       });
       await upload.done();
 
-      // Generate the Permanent App Link (Redirector)
       const appLink = `https://${url.host}/download/${fileName}`;
       const data = { id: crypto.randomUUID(), fileName, appLink, createdAt: new Date(), source: "File" };
       await kv.set(["uploads", MAX_DATE_MS - Date.now(), data.id], data);
@@ -185,15 +191,15 @@ Deno.serve(async (req: Request) => {
                 Key: fileName, 
                 Body: r.body as any, 
                 ContentType: r.headers.get("content-type")||"application/octet-stream",
+                // 🔥 FIX 2: OPTIMIZED SPEED 🔥
                 ContentDisposition: `attachment; filename="${fileName}"`,
                 CacheControl: "public, max-age=31536000, immutable"
             },
-            queueSize: 8, partSize: 20 * 1024 * 1024
+            queueSize: 8, partSize: 50 * 1024 * 1024 // Increased to 50MB
           });
           upload.on("httpUploadProgress", p => { if(total) push({progress:Math.round((p.loaded!/total)*100)}) });
           await upload.done();
 
-          // Generate the Permanent App Link (Redirector)
           const appLink = `https://${url.host}/download/${fileName}`;
           const data = { id: crypto.randomUUID(), fileName, appLink, createdAt: new Date(), source: "URL" };
           await kv.set(["uploads", MAX_DATE_MS - Date.now(), data.id], data);
@@ -205,23 +211,20 @@ Deno.serve(async (req: Request) => {
     return new Response(body, { headers: { "Content-Type": "application/x-ndjson" } });
   }
 
-  // --- ROUTE 4: PROXY/REDIRECT (BANDWIDTH SAVER) ---
-  // This creates a permanent link that redirects to a signed, bandwidth-saving R2 link
+  // --- ROUTE 4: PUBLIC DOWNLOAD (REDIRECT) ---
+  // This route is now explicitly PUBLIC (No Password)
   if (req.method === "GET" && url.pathname.startsWith("/download/")) {
-    const key = url.pathname.substring(10); // Remove "/download/"
+    const key = url.pathname.substring(10); 
     
     try {
-        // Generate a signed URL that is valid for 1 hour
         const command = new GetObjectCommand({
             Bucket: R2_BUCKET_NAME,
             Key: key,
-            ResponseContentDisposition: `attachment; filename="${key}"`, // Force download
-            ResponseCacheControl: "public, max-age=31536000" // Speed
+            ResponseContentDisposition: `attachment; filename="${key}"`,
+            ResponseCacheControl: "public, max-age=31536000"
         });
         
         const signedUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
-        
-        // 🔥 CRITICAL: 302 Redirect means user downloads from R2, not Deno
         return Response.redirect(signedUrl, 302);
     } catch (e) {
         return new Response("Link expired or file not found", { status: 404 });
